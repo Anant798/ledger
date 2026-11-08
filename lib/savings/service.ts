@@ -19,7 +19,7 @@ export class SavingsService {
       .from("savings_goals")
       .select(`
         *,
-        contributions:goal_contributions(*)
+        contributions:goal_contributions(*, events:savings_contribution_events(*))
       `)
       .eq("user_id", userId)
       .is("deleted_at", null)
@@ -52,7 +52,7 @@ export class SavingsService {
       .from("savings_goals")
       .select(`
         *,
-        contributions:goal_contributions(*)
+        contributions:goal_contributions(*, events:savings_contribution_events(*))
       `)
       .eq("id", goalId)
       .eq("user_id", userId)
@@ -94,11 +94,18 @@ export class SavingsService {
    */
   static async update(userId: string, goalId: string, input: UpdateSavingsGoalInput) {
     const supabase = await createClient();
+    const shouldComplete = input.status === "completed";
+    if (shouldComplete) {
+      const current = await this.getById(userId, goalId);
+      if (!current?.isGoalMet) throw new Error("Goal cannot be completed before confirmed contributions reach the target.");
+    }
+    const details = { ...input };
+    if (shouldComplete) delete details.status;
 
     const { data, error } = await supabase
       .from("savings_goals")
       .update({
-        ...input,
+        ...details,
         updated_at: new Date().toISOString(),
       })
       .eq("id", goalId)
@@ -108,6 +115,7 @@ export class SavingsService {
       .single();
 
     if (error) throw error;
+    if (shouldComplete) await this.complete(userId, goalId);
     return data;
   }
 

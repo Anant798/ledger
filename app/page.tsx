@@ -11,6 +11,8 @@ export default function Home() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [dateOfBirth, setDateOfBirth] = useState("");
   const [isSignup, setIsSignup] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
@@ -43,6 +45,7 @@ export default function Home() {
         password,
         options: {
           emailRedirectTo: `${window.location.origin}/auth/callback`,
+          data: { full_name: fullName.trim(), date_of_birth: dateOfBirth },
         },
       });
 
@@ -69,8 +72,8 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen bg-[#F3EEDF] text-[#302B22] flex items-center justify-center p-6">
-      <div className="w-full max-w-md border border-[#C9BDA6] bg-[#FAF7EF] shadow-xl">
+    <main className="flex min-h-screen items-center justify-center px-4 py-8 text-[#302B22] sm:p-6">
+      <div className="relative w-full max-w-md border border-[#BFAF8D] bg-[#FAF7EF] shadow-[0_18px_48px_rgba(53,43,29,0.14)]">
         <div className="border-b border-[#D8CEBB] px-8 py-10 text-center">
           <p className="text-xs tracking-[0.35em] text-[#897653]">
             PERSONAL FINANCIAL LEDGER
@@ -82,9 +85,7 @@ export default function Home() {
 
           <div className="mx-auto my-5 h-px w-16 bg-[#A48A5E]" />
 
-          <p className="text-sm text-[#756C5D]">
-            Old-school money sense. Modern-day intelligence.
-          </p>
+          <p className="text-sm text-[#756C5D]">A clear record of your money, kept with care.</p>
         </div>
 
         <div className="px-8 py-8">
@@ -95,16 +96,27 @@ export default function Home() {
           <p className="mt-2 text-sm text-[#817766]">
             {isSignup
               ? "Start keeping your finances in order."
-              : "Your financial story, organised in one place."}
+              : "See your money in one place."}
           </p>
 
           <form onSubmit={handleEmailAuth} className="mt-7 space-y-4">
+            {isSignup && <>
+              <div>
+                <label className="mb-2 block text-sm font-medium" htmlFor="full-name">Full name</label>
+                <input id="full-name" type="text" required minLength={1} maxLength={200} autoComplete="name" value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Your name" className="w-full border border-[#CFC3AE] bg-[#FFFDF8] px-4 py-3 text-sm outline-none transition focus:border-[#8B754F]" />
+              </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium" htmlFor="date-of-birth">Date of birth</label>
+                <input id="date-of-birth" type="date" required max={new Date().toISOString().slice(0, 10)} autoComplete="bday" value={dateOfBirth} onChange={(e) => setDateOfBirth(e.target.value)} className="w-full border border-[#CFC3AE] bg-[#FFFDF8] px-4 py-3 text-sm outline-none transition focus:border-[#8B754F]" />
+              </div>
+            </>}
             <div>
-              <label className="mb-2 block text-sm font-medium">
+              <label htmlFor="email" className="mb-2 block text-sm font-medium">
                 Email address
               </label>
               <input
                 type="email"
+                id="email"
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -114,11 +126,12 @@ export default function Home() {
             </div>
 
             <div>
-              <label className="mb-2 block text-sm font-medium">
+              <label htmlFor="password" className="mb-2 block text-sm font-medium">
                 Password
               </label>
               <input
                 type="password"
+                id="password"
                 required
                 minLength={6}
                 value={password}
@@ -163,9 +176,7 @@ export default function Home() {
           )}
 
           <p className="mt-7 text-center text-sm text-[#817766]">
-            {isSignup
-              ? "Already have an account?"
-              : "New to Ledger?"}{" "}
+            {isSignup ? "Already have an account?" : "New to Ledger?"}{" "}
             <button
               type="button"
               onClick={() => {

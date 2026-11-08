@@ -1,60 +1,29 @@
-
-import { redirect } from "next/navigation";
-import { connection } from "next/server";
+import { ArrowLeftRight, CreditCard, PiggyBank, UsersRound } from "lucide-react";
+import Link from "next/link";
+import Transactions from "@/components/transactions";
+import PageHeading from "@/components/page-heading";
 import { createClient } from "@/lib/supabase/server";
-import ExpenseGroups from "@/components/expense-groups";
-import NotificationCenter from "@/components/notification-center";
-import SavingsGoals from "@/components/savings-goals";
 
 export default async function DashboardPage() {
-  // Wait for an incoming request before rendering.
-  await connection();
-
   const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  const { data: profile } = user ? await supabase.from("profiles").select("full_name").eq("id", user.id).maybeSingle() : { data: null };
+  const name = profile?.full_name?.trim() || user?.user_metadata?.full_name || user?.user_metadata?.name || "";
 
-  const {
-    data: { user },
-    error,
-  } = await supabase.auth.getUser();
+  return <div>
+    <PageHeading eyebrow="YOUR BOOK OF ACCOUNTS" title="Your money summary" description={name ? `Welcome, ${name}.` : "A clear view of your money, all in one place."} hi={{ eyebrow: "आपके पैसों का हिसाब", title: "आपके पैसों का सार", description: name ? `नमस्ते, ${name}।` : "अपने पैसों का साफ़ हिसाब, एक जगह।" }}/>
+    <Transactions summaryOnly />
+    <section className="mt-8">
+      <h2 className="text-xl">Go to a page</h2>
+      <div className="mt-4 grid gap-3 sm:grid-cols-3">
+        <HomeLink href="/dashboard/banking" icon={<CreditCard size={19}/>} title="Money In & Out" note="See, add, and update your transactions"/>
+        <HomeLink href="/dashboard/groups" icon={<UsersRound size={19}/>} title="Group Payments" note="Track shared costs and money owed"/>
+        <HomeLink href="/dashboard/savings" icon={<PiggyBank size={19}/>} title="Savings Goals" note="See how your savings are growing"/>
+      </div>
+    </section>
+  </div>;
+}
 
-  if (error || !user) {
-    redirect("/");
-  }
-
-  return (
-    <main className="min-h-screen bg-[#F3EEDF] p-8 text-[#302B22]">
-      <header className="border-b border-[#C9BDA6] pb-6">
-        <p className="text-xs tracking-[0.3em] text-[#897653]">
-          PERSONAL FINANCIAL LEDGER
-        </p>
-
-        <h1 className="mt-3 font-serif text-4xl">Ledger</h1>
-        <div className="mt-4 flex items-center gap-4">
-          <NotificationCenter />
-          <form action="/auth/signout" method="post">
-          <button type="submit" className="text-sm text-[#715B37] underline underline-offset-4">
-            Sign out
-          </button>
-          </form>
-        </div>
-      </header>
-
-      <section className="mt-12">
-        <h2 className="font-serif text-3xl">
-          Welcome to your ledger.
-        </h2>
-
-        <p className="mt-3 text-[#756C5D]">
-          Signed in as {user.email}
-        </p>
-
-        <p className="mt-6 text-sm text-[#897653]">
-          Keep shared costs clear and repayment history together.
-        </p>
-      </section>
-
-      <ExpenseGroups />
-      <SavingsGoals />
-    </main>
-  );
+function HomeLink({ href, icon, title, note }: { href: string; icon: React.ReactNode; title: string; note: string }) {
+  return <Link href={href} className="ledger-page group flex items-start gap-4 p-5 transition hover:bg-[#f7f1e5]"><span className="grid h-10 w-10 shrink-0 place-items-center border border-[#d1c3a7] text-[#806b45]">{icon}</span><span><strong className="font-serif text-lg text-[#302b22]">{title}</strong><span className="mt-1 block text-sm text-[#756c5d]">{note}</span></span><ArrowLeftRight className="ml-auto mt-1 shrink-0 text-[#9b8966]" size={17}/></Link>;
 }

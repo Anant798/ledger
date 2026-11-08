@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { calculateSplit } from "@/lib/shared-expenses/calculations";
+import { useLanguage } from "@/components/language-provider";
 
 type Participant = {
   id: string;
@@ -50,6 +51,7 @@ function paymentHistory(group: ExpenseGroup) {
 }
 
 export default function ExpenseGroups() {
+  const { text } = useLanguage();
   const [groups, setGroups] = useState<ExpenseGroup[]>([]);
   const [archived, setArchived] = useState(false);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -260,27 +262,27 @@ export default function ExpenseGroups() {
   const activeBalance = groups.reduce((sum, group) => sum + group.outstandingBalance, 0);
 
   return (
-    <section className="mx-auto mt-10 max-w-6xl">
+    <section className="mx-auto max-w-6xl border border-[#C9BDA6] bg-[#FBF8F0] p-4 sm:p-6">
       <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.25em] text-[#8B754F]">Shared ledger</p>
-          <h2 className="mt-2 font-serif text-3xl text-[#302B22]">Expense groups</h2>
-          <p className="mt-2 max-w-xl text-sm text-[#756C5D]">Split shared costs, see each person’s balance, and keep repayment history with the expense.</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-[#8B754F]">{text("SHARED COSTS", "साझा खर्च")}</p>
+          <h2 className="mt-2 font-serif text-3xl text-[#302B22]">{text("Group Payments", "साझा भुगतान")}</h2>
+          <p className="mt-2 max-w-xl text-sm text-[#756C5D]">{text("Split shared costs and see how much money you are waiting to get back.", "साझा खर्च बाँटें और देखें कि कितने पैसे वापस मिलने हैं।")}</p>
         </div>
         <div className="flex items-center gap-3">
           <button onClick={() => setArchived((value) => !value)} className="border border-[#C9BDA6] bg-[#FAF7EF] px-4 py-2.5 text-sm text-[#51452F] hover:bg-[#F0EBDD]">
-            {archived ? "Active expenses" : "Archived"}
+            {archived ? text("Open costs", "चालू खर्च") : text("Closed costs", "बंद खर्च")}
           </button>
-          {!archived && <button onClick={openCreate} className="bg-[#51452F] px-5 py-2.5 text-sm font-medium text-white hover:bg-[#6B593B]">+ Add expense</button>}
+          {!archived && <button onClick={openCreate} className="bg-[#51452F] px-5 py-2.5 text-sm font-medium text-white hover:bg-[#6B593B]">+ {text("Add shared cost", "साझा खर्च जोड़ें")}</button>}
         </div>
       </div>
 
       {error && <div role="alert" className="mb-5 border border-[#C98D78] bg-[#FBF0EA] px-4 py-3 text-sm text-[#7B3E2E]">{error}</div>}
 
       {!archived && <div className="mb-6 grid gap-4 sm:grid-cols-3">
-        <SummaryCard label="Outstanding to you" value={money(activeBalance)} />
-        <SummaryCard label="Active expenses" value={String(groups.length)} />
-        <SummaryCard label="Settled" value={String(groups.filter((group) => group.isFullySettled).length)} />
+        <SummaryCard label={text("Money still owed you", "आपको मिलने वाले पैसे")} value={money(activeBalance)} />
+        <SummaryCard label={text("Open costs", "चालू खर्च")} value={String(groups.length)} />
+        <SummaryCard label={text("Paid in full", "पूरा भुगतान हुआ")} value={String(groups.filter((group) => group.isFullySettled).length)} />
       </div>}
 
       {loading ? <div className="border border-[#DDD3C0] bg-[#FAF7EF] p-8 text-center text-sm text-[#756C5D]">Loading expenses…</div>
@@ -365,6 +367,7 @@ function ExpenseCard({ group, archived, onEdit, onArchive, onRestore, repayingSh
   onUpdateRepayment: (id: string, input: { amount: number; payment_method: string; idempotency_key: string }) => Promise<boolean>;
   onReverseRepayment: (id: string, reason: string) => Promise<boolean>; saving: boolean;
 }) {
+  const { text } = useLanguage();
   const [editingRepayment, setEditingRepayment] = useState<string | null>(null);
   const [editedAmount, setEditedAmount] = useState("");
   const [editedMethod, setEditedMethod] = useState("other");
@@ -386,7 +389,7 @@ function ExpenseCard({ group, archived, onEdit, onArchive, onRestore, repayingSh
     <div className="divide-y divide-[#EAE2D4]">
       {selfShare && <div className="flex items-center justify-between px-5 py-3 text-sm"><div><p className="font-medium text-[#51452F]">Your share <span className="ml-1 text-xs font-normal text-[#817766]">(payer)</span></p><p className="text-xs text-[#817766]">Not counted as money owed back to you</p></div><p className="font-medium text-[#51452F]">{money(selfShare.amount_owed, group.currency_code)}</p></div>}
       {debtShares.map((share) => <div key={share.id} className="px-5 py-3">
-        <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="font-medium text-[#51452F]">{share.participant_name}</p><p className="text-xs text-[#817766]">Share {money(share.amount_owed, group.currency_code)} · repaid {money(share.totalRepaid || 0, group.currency_code)}</p>{share.email && <p className="text-xs text-[#817766]">{share.email}</p>}</div><div className="flex items-center gap-3"><div className="text-right"><p className="text-xs text-[#817766]">Outstanding</p><p className={`font-semibold ${Number(share.outstandingBalance || 0) > 0.01 ? "text-[#805F22]" : "text-[#4E6942]"}`}>{money(share.outstandingBalance || 0, group.currency_code)}</p></div>{!archived && Number(share.outstandingBalance || 0) > 0.01 && <button onClick={() => { setRepayingShare(repayingShare === share.id ? null : share.id); setRepaymentAmount(String(share.outstandingBalance)); }} className="border border-[#C9BDA6] px-3 py-1.5 text-xs text-[#51452F]">Record repayment</button>}</div></div>
+        <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="font-medium text-[#51452F]">{share.participant_name}</p><p className="text-xs text-[#817766]">{text("Share", "हिस्सा")} {money(share.amount_owed, group.currency_code)} · {text("paid back", "वापस मिले")} {money(share.totalRepaid || 0, group.currency_code)}</p>{share.email && <p className="text-xs text-[#817766]">{share.email}</p>}</div><div className="flex items-center gap-3"><div className="text-right"><p className="text-xs text-[#817766]">{text("Money still owed", "अभी मिलने वाले पैसे")}</p><p className={`font-semibold ${Number(share.outstandingBalance || 0) > 0.01 ? "text-[#805F22]" : "text-[#4E6942]"}`}>{money(share.outstandingBalance || 0, group.currency_code)}</p></div>{!archived && Number(share.outstandingBalance || 0) > 0.01 && <button onClick={() => { setRepayingShare(repayingShare === share.id ? null : share.id); setRepaymentAmount(String(share.outstandingBalance)); }} className="border border-[#C9BDA6] px-3 py-1.5 text-xs text-[#51452F]">{text("Add payment", "भुगतान जोड़ें")}</button>}</div></div>
         {repayingShare === share.id && <div className="mt-3 flex flex-wrap items-end gap-2"><label className="text-xs text-[#756C5D]">Amount received<input autoFocus type="number" min="0.01" max={Number(share.outstandingBalance || 0)} step="0.01" value={repaymentAmount} onChange={(event) => setRepaymentAmount(event.target.value)} className="mt-1 block w-36 border border-[#CFC3AE] bg-white px-2.5 py-2 text-sm" /></label><button disabled={saving} onClick={() => onRepayment(share)} className="bg-[#51452F] px-3 py-2 text-xs text-white disabled:opacity-50">{saving ? "Saving…" : "Confirm received"}</button><button onClick={() => setRepayingShare(null)} className="px-2 py-2 text-xs text-[#756C5D]">Cancel</button></div>}
         {share.repayments?.length ? <details className="mt-2 text-xs text-[#756C5D]"><summary className="cursor-pointer">{share.repayments.length} repayment record{share.repayments.length === 1 ? "" : "s"}</summary><ul className="mt-2 space-y-2">{[...share.repayments].sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || ""))).map((repayment) => <li key={repayment.id} className="border-l-2 border-[#C9BDA6] pl-3"><p><strong>{share.participant_name}</strong> paid you {money(repayment.amount, group.currency_code)}{repayment.payment_method ? ` via ${repayment.payment_method.replaceAll("_", " ")}` : ""} · {repayment.payment_status} · {repayment.confirmed_at || repayment.created_at ? new Date(repayment.confirmed_at || repayment.created_at!).toLocaleDateString() : "date unavailable"}</p>{repayment.reversal_reason && <p className="mt-1 text-[#9A4E3D]">Reversal: {repayment.reversal_reason}</p>}{!archived && repayment.payment_status === "confirmed" && <div className="mt-1 flex gap-3"><button type="button" onClick={() => { setEditingRepayment(repayment.id); setEditedAmount(String(repayment.amount)); setEditedMethod(repayment.payment_method || "other"); }} className="text-[#715B37] underline">Edit</button><button type="button" onClick={() => { const reason = window.prompt("Why are you reversing this repayment?"); if (reason?.trim()) void onReverseRepayment(repayment.id, reason.trim()); }} className="text-[#9A4E3D] underline">Reverse</button></div>}{editingRepayment === repayment.id && <div className="mt-2 flex flex-wrap items-end gap-2"><label>Amount<input type="number" min="0.01" step="0.01" value={editedAmount} onChange={(event) => setEditedAmount(event.target.value)} className="mt-1 block w-28 border border-[#CFC3AE] px-2 py-1.5" /></label><label>Method<select value={editedMethod} onChange={(event) => setEditedMethod(event.target.value)} className="mt-1 block border border-[#CFC3AE] bg-white px-2 py-1.5">{["upi", "paypal", "cash", "bank_transfer", "other"].map((method) => <option key={method} value={method}>{method.replaceAll("_", " ")}</option>)}</select></label><button type="button" disabled={saving} onClick={async () => { const key = editKeys.current[repayment.id] || (editKeys.current[repayment.id] = crypto.randomUUID()); const ok = await onUpdateRepayment(repayment.id, { amount: Number(editedAmount), payment_method: editedMethod, idempotency_key: key }); if (ok) { delete editKeys.current[repayment.id]; setEditingRepayment(null); } }} className="bg-[#51452F] px-3 py-2 text-white disabled:opacity-50">Save</button><button type="button" onClick={() => setEditingRepayment(null)} className="px-2 py-2">Cancel</button></div>}</li>)}</ul></details> : null}
         {share.repayments?.some((repayment) => repayment.events?.length) && <details className="mt-2 text-[11px] text-[#817766]"><summary className="cursor-pointer">Audit trail</summary><ul className="mt-1 space-y-1">{share.repayments.flatMap((repayment) => (repayment.events || []).map((event) => <li key={event.id}>{new Date(event.created_at).toLocaleString()} · {event.event_type === "updated" ? `Edited ${money(event.metadata.amount as number | string, group.currency_code)} (was ${money(event.metadata.previous_amount as number | string, group.currency_code)})` : event.event_type === "reversed" ? `Reversed${event.metadata.reason ? `: ${String(event.metadata.reason)}` : ""}` : `Repayment ${event.event_type}`} · {event.event_source}</li>))}</ul></details>}

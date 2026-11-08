@@ -4,7 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { encryptToken } from "@/lib/gmail/encryption";
 import { google } from "googleapis";
 import { verifyGmailOAuthState } from "@/lib/gmail/oauth-state";
-import { GMAIL_SCOPES } from "@/lib/gmail/client";
+import { hasReadOnlyGmailScope } from "@/lib/gmail/client";
 
 export async function GET(request: Request) {
   try {
@@ -38,7 +38,7 @@ export async function GET(request: Request) {
 
     const oauth2Client = getOAuth2Client();
     const { tokens } = await oauth2Client.getToken(code);
-    if (!tokens.access_token || !tokens.scope?.split(/\s+/).includes(GMAIL_SCOPES[0])) {
+    if (!tokens.access_token || !hasReadOnlyGmailScope(tokens.scope)) {
       return NextResponse.json({ error: "Google did not grant Gmail read-only access." }, { status: 400 });
     }
     oauth2Client.setCredentials(tokens);

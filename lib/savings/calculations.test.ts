@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { calculateSavingsProgress, nextSavingsRun } from "./calculations.ts";
+import { addContributionSchema, savingsRuleSchema, updateContributionSchema } from "./validation.ts";
 
 test("savings progress counts confirmed contributions only and returns accurate remainder", () => {
   const progress = calculateSavingsProgress(100, [
@@ -30,4 +31,11 @@ test("monthly recurring schedule clamps end-of-month dates", () => {
 
 test("weekly recurring schedule advances exactly seven days", () => {
   assert.equal(nextSavingsRun(new Date("2026-01-01T12:00:00Z"), "weekly").toISOString(), "2026-01-08T12:00:00.000Z");
+});
+
+test("contribution and recurrence validation reject invalid financial inputs", () => {
+  assert.equal(addContributionSchema.safeParse({ goal_id: "00000000-0000-4000-8000-000000000001", amount: 0 }).success, false);
+  assert.equal(updateContributionSchema.safeParse({ notes: "corrected note" }).success, true);
+  assert.equal(savingsRuleSchema.safeParse({ amount: 10, frequency: "monthly", enabled: true }).success, true);
+  assert.equal(savingsRuleSchema.safeParse({ amount: -1, frequency: "monthly", enabled: true }).success, false);
 });

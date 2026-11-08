@@ -3,6 +3,8 @@
 ALTER TABLE public.savings_goals ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
 ALTER TABLE public.goal_contributions ADD COLUMN IF NOT EXISTS manually_reversed_at timestamptz;
 ALTER TABLE public.goal_contributions ADD COLUMN IF NOT EXISTS reversed_by_user_id uuid REFERENCES auth.users(id) ON DELETE SET NULL;
+ALTER TABLE public.goal_contributions ADD COLUMN IF NOT EXISTS source_amount numeric;
+UPDATE public.goal_contributions SET source_amount=amount WHERE transaction_id IS NOT NULL AND source_amount IS NULL;
 CREATE INDEX IF NOT EXISTS idx_savings_goals_active_user ON public.savings_goals(user_id, created_at DESC) WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS public.savings_contribution_events (
@@ -33,7 +35,7 @@ CREATE TABLE IF NOT EXISTS public.savings_goal_rules (
   user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   amount numeric NOT NULL CHECK (amount > 0),
   frequency text NOT NULL CHECK (frequency IN ('weekly','monthly')),
-  day_of_month smallint CHECK (day_of_month BETWEEN 1 AND 31),
+  day_of_month smallint NOT NULL DEFAULT EXTRACT(DAY FROM now())::smallint CHECK (day_of_month BETWEEN 1 AND 31),
   enabled boolean NOT NULL DEFAULT true,
   next_run_at timestamptz NOT NULL DEFAULT now(),
   last_run_at timestamptz,
@@ -56,7 +58,7 @@ END $$;
 
 CREATE OR REPLACE FUNCTION public.audit_savings_contribution_source_changes()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-DECLARE v_goal public.savings_goals; v_total numeric;
+DECLARE v_goal public.savings_goals; v_total numeric; v_before numeric;
 BEGIN
   IF TG_OP='INSERT' THEN
     INSERT INTO public.savings_contribution_events(contribution_id,goal_id,user_id,event_type,after_state)
@@ -66,6 +68,15 @@ BEGIN
       INSERT INTO public.alerts(user_id,alert_type,title,message,is_read,is_resolved)
         VALUES(NEW.user_id,'general','Savings contribution recorded',format('Added %s to %s.',NEW.amount,v_goal.title),false,false);
       SELECT COALESCE(SUM(amount),0) INTO v_total FROM public.goal_contributions WHERE goal_id=NEW.goal_id AND contribution_status='confirmed';
+      v_before:=v_total-NEW.amount;
+      IF v_before<v_goal.target_amount*0.5 AND v_total>=v_goal.target_amount*0.5 THEN
+        INSERT INTO public.alerts(user_id,alert_type,title,message,is_read,is_resolved)
+          VALUES(NEW.user_id,'goal_milestone','Savings goal halfway there',format('%s reached 50%% of its target.',v_goal.title),false,false);
+      END IF;
+      IF v_before<v_goal.target_amount*0.25 AND v_total>=v_goal.target_amount*0.25 THEN
+        INSERT INTO public.alerts(user_id,alert_type,title,message,is_read,is_resolved)
+          VALUES(NEW.user_id,'goal_milestone','Savings goal milestone',format('%s reached 25%% of its target.',v_goal.title),false,false);
+      END IF;
       IF v_total>=v_goal.target_amount AND v_goal.status='active' THEN
         UPDATE public.savings_goals SET status='completed',updated_at=now() WHERE id=NEW.goal_id;
         UPDATE public.savings_goal_rules SET enabled=false,updated_at=now() WHERE goal_id=NEW.goal_id;
@@ -73,18 +84,51 @@ BEGIN
           VALUES(NEW.user_id,'goal_milestone','Savings goal completed',format('You reached your %s savings target.',v_goal.title),false,false);
       END IF;
     END IF;
-  ELSIF NEW.contribution_status IS DISTINCT FROM OLD.contribution_status
+  ELSIF (NEW.contribution_status IS DISTINCT FROM OLD.contribution_status OR NEW.amount IS DISTINCT FROM OLD.amount)
     AND NEW.manually_reversed_at IS NULL AND NEW.contribution_source<>'manual' THEN
     INSERT INTO public.savings_contribution_events(contribution_id,goal_id,user_id,event_type,before_state,after_state,reason)
-      VALUES(NEW.id,NEW.goal_id,NEW.user_id,'reversed',to_jsonb(OLD),to_jsonb(NEW),'Source transaction reversed, failed, or refunded');
+      VALUES(NEW.id,NEW.goal_id,NEW.user_id,CASE WHEN NEW.contribution_status='reversed' THEN 'reversed' ELSE 'updated' END,
+        to_jsonb(OLD),to_jsonb(NEW),'Source transaction reversed, failed, or refunded');
     PERFORM public.reconcile_savings_goal_completion(NEW.goal_id,NEW.user_id);
   END IF;
   RETURN NEW;
 END; $$;
 REVOKE ALL ON FUNCTION public.audit_savings_contribution_source_changes() FROM PUBLIC,anon,authenticated;
 CREATE TRIGGER trg_audit_savings_contribution_source_changes
-AFTER INSERT OR UPDATE OF contribution_status ON public.goal_contributions
+AFTER INSERT OR UPDATE OF contribution_status,amount ON public.goal_contributions
 FOR EACH ROW EXECUTE FUNCTION public.audit_savings_contribution_source_changes();
+
+CREATE OR REPLACE FUNCTION public.initialize_goal_contribution_source_amount()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF NEW.transaction_id IS NOT NULL AND NEW.source_amount IS NULL THEN NEW.source_amount:=NEW.amount; END IF;
+  RETURN NEW;
+END; $$;
+REVOKE ALL ON FUNCTION public.initialize_goal_contribution_source_amount() FROM PUBLIC,anon,authenticated;
+CREATE TRIGGER trg_initialize_goal_contribution_source_amount
+BEFORE INSERT ON public.goal_contributions FOR EACH ROW EXECUTE FUNCTION public.initialize_goal_contribution_source_amount();
+
+CREATE OR REPLACE FUNCTION public.add_transaction_goal_contribution(
+  p_user_id uuid,p_goal_id uuid,p_transaction_id uuid,p_amount numeric,p_notes text
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE v_row public.goal_contributions;
+BEGIN
+  IF auth.uid() IS NOT NULL AND auth.uid() IS DISTINCT FROM p_user_id THEN RAISE EXCEPTION 'not authorized'; END IF;
+  IF p_amount<=0 THEN RAISE EXCEPTION 'Contribution amount must be positive'; END IF;
+  PERFORM 1 FROM public.savings_goals WHERE id=p_goal_id AND user_id=p_user_id AND deleted_at IS NULL FOR UPDATE;
+  IF NOT FOUND OR NOT EXISTS(SELECT 1 FROM public.transactions WHERE id=p_transaction_id AND user_id=p_user_id AND status='completed') THEN
+    RAISE EXCEPTION 'Active goal or completed owned transaction not found';
+  END IF;
+  INSERT INTO public.goal_contributions(goal_id,user_id,amount,contribution_source,contribution_status,notes,contributed_at,idempotency_key,transaction_id)
+    VALUES(p_goal_id,p_user_id,p_amount,'transaction','confirmed',p_notes,now(),p_transaction_id,p_transaction_id)
+    ON CONFLICT (user_id,goal_id,idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING * INTO v_row;
+  IF NOT FOUND THEN
+    SELECT * INTO v_row FROM public.goal_contributions WHERE user_id=p_user_id AND goal_id=p_goal_id AND idempotency_key=p_transaction_id;
+  END IF;
+  RETURN to_jsonb(v_row);
+END; $$;
+REVOKE ALL ON FUNCTION public.add_transaction_goal_contribution(uuid,uuid,uuid,numeric,text) FROM PUBLIC,anon;
+GRANT EXECUTE ON FUNCTION public.add_transaction_goal_contribution(uuid,uuid,uuid,numeric,text) TO authenticated,service_role;
 
 CREATE OR REPLACE FUNCTION public.reconcile_goal_contribution_refunds(p_source_transaction_id uuid)
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
@@ -94,8 +138,11 @@ BEGIN
   SELECT status INTO v_source_status FROM public.transactions WHERE id=p_source_transaction_id;
   SELECT COALESCE(SUM(abs(amount)),0) INTO v_refunded FROM public.transactions
     WHERE related_transaction_id=p_source_transaction_id AND transaction_type IN ('refund','reversal') AND status='completed';
-  UPDATE public.goal_contributions gc SET contribution_status=CASE
-    WHEN v_source_status IN ('failed','cancelled','refunded') OR v_refunded>=gc.amount THEN 'reversed' ELSE 'confirmed' END
+  UPDATE public.goal_contributions gc SET
+    amount=CASE WHEN v_source_status IN ('failed','cancelled','refunded') THEN 0
+      ELSE greatest(COALESCE(gc.source_amount,gc.amount)-v_refunded,0) END,
+    contribution_status=CASE
+      WHEN v_source_status IN ('failed','cancelled','refunded') OR v_refunded>=COALESCE(gc.source_amount,gc.amount) THEN 'reversed' ELSE 'confirmed' END
     WHERE gc.transaction_id=p_source_transaction_id AND gc.manually_reversed_at IS NULL
       AND gc.contribution_status IN ('confirmed','reversed');
 END; $$;
@@ -137,11 +184,13 @@ BEGIN
     VALUES(p_user_id,'general','Savings contribution recorded',format('Added %s to %s.',p_amount,v_goal.title),false,false);
   IF v_old<v_goal.target_amount*0.5 AND v_total>=v_goal.target_amount*0.5 THEN
     INSERT INTO public.alerts(user_id,alert_type,title,message,is_read,is_resolved) VALUES(p_user_id,'goal_milestone','Savings goal halfway there',format('%s reached 50%% of its target.',v_goal.title),false,false);
-  ELSIF v_old<v_goal.target_amount*0.25 AND v_total>=v_goal.target_amount*0.25 THEN
+  END IF;
+  IF v_old<v_goal.target_amount*0.25 AND v_total>=v_goal.target_amount*0.25 THEN
     INSERT INTO public.alerts(user_id,alert_type,title,message,is_read,is_resolved) VALUES(p_user_id,'goal_milestone','Savings goal milestone',format('%s reached 25%% of its target.',v_goal.title),false,false);
   END IF;
   IF v_old<v_goal.target_amount AND v_total>=v_goal.target_amount THEN
     UPDATE public.savings_goals SET status='completed',updated_at=now() WHERE id=p_goal_id;
+    UPDATE public.savings_goal_rules SET enabled=false,updated_at=now() WHERE goal_id=p_goal_id;
     INSERT INTO public.alerts(user_id,alert_type,title,message,is_read,is_resolved) VALUES(p_user_id,'goal_milestone','Savings goal completed',format('You reached your %s savings target.',v_goal.title),false,false);
   END IF;
   RETURN to_jsonb(v_row);
@@ -170,6 +219,7 @@ BEGIN
   IF NOT FOUND THEN RAISE EXCEPTION 'Savings goal not found'; END IF;
   SELECT COALESCE(SUM(amount),0) INTO v_total FROM public.goal_contributions WHERE goal_id=p_goal_id AND contribution_status='confirmed';
   IF v_total<v_goal.target_amount THEN RAISE EXCEPTION 'Goal cannot be completed before confirmed contributions reach the target'; END IF;
+  IF v_goal.status='completed' THEN RETURN jsonb_build_object('completed',true,'confirmed_amount',v_total,'already_completed',true); END IF;
   UPDATE public.savings_goals SET status='completed',updated_at=now() WHERE id=p_goal_id;
   UPDATE public.savings_goal_rules SET enabled=false,updated_at=now() WHERE goal_id=p_goal_id;
   INSERT INTO public.alerts(user_id,alert_type,title,message,is_read,is_resolved) VALUES(p_user_id,'goal_milestone','Savings goal completed',format('You reached your %s savings target.',v_goal.title),false,false);
@@ -222,6 +272,7 @@ CREATE OR REPLACE FUNCTION public.reconcile_savings_goal_completion(p_goal_id uu
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_goal public.savings_goals; v_total numeric;
 BEGIN
+  IF auth.uid() IS NOT NULL AND auth.uid() IS DISTINCT FROM p_user_id THEN RAISE EXCEPTION 'not authorized'; END IF;
   SELECT * INTO v_goal FROM public.savings_goals WHERE id=p_goal_id AND user_id=p_user_id FOR UPDATE;
   IF NOT FOUND OR v_goal.deleted_at IS NOT NULL THEN RETURN; END IF;
   SELECT COALESCE(SUM(amount),0) INTO v_total FROM public.goal_contributions WHERE goal_id=p_goal_id AND contribution_status='confirmed';
@@ -239,27 +290,34 @@ GRANT EXECUTE ON FUNCTION public.reconcile_savings_goal_completion(uuid,uuid) TO
 
 CREATE OR REPLACE FUNCTION public.run_due_savings_goal_rules(p_limit integer DEFAULT 100)
 RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-DECLARE r record; v_contribution public.goal_contributions; v_total numeric; v_count integer:=0; v_next timestamptz;
+DECLARE r record; v_rule public.savings_goal_rules; v_goal public.savings_goals; v_contribution public.goal_contributions; v_total numeric; v_count integer:=0; v_next timestamptz;
 BEGIN
   IF auth.role()<>'service_role' THEN RAISE EXCEPTION 'service role required'; END IF;
   FOR r IN SELECT rule.*,goal.title,goal.target_amount FROM public.savings_goal_rules rule
     JOIN public.savings_goals goal ON goal.id=rule.goal_id AND goal.user_id=rule.user_id
     WHERE rule.enabled AND rule.next_run_at<=now() AND goal.status='active' AND goal.deleted_at IS NULL
-    ORDER BY rule.next_run_at FOR UPDATE OF rule SKIP LOCKED LIMIT LEAST(GREATEST(p_limit,1),500)
+    ORDER BY rule.next_run_at LIMIT LEAST(GREATEST(p_limit,1),500)
   LOOP
+    -- Lock in goal-then-rule order, matching authenticated contribution writes.
+    SELECT * INTO v_goal FROM public.savings_goals WHERE id=r.goal_id AND user_id=r.user_id
+      AND status='active' AND deleted_at IS NULL FOR UPDATE SKIP LOCKED;
+    IF NOT FOUND THEN CONTINUE; END IF;
+    SELECT * INTO v_rule FROM public.savings_goal_rules WHERE id=r.id AND user_id=r.user_id
+      AND enabled AND next_run_at<=now() FOR UPDATE SKIP LOCKED;
+    IF NOT FOUND THEN CONTINUE; END IF;
     INSERT INTO public.goal_contributions(goal_id,user_id,amount,contribution_source,contribution_status,notes,contributed_at)
-      VALUES(r.goal_id,r.user_id,r.amount,'automatic','confirmed','Scheduled savings contribution',now()) RETURNING * INTO v_contribution;
-    SELECT COALESCE(SUM(amount),0) INTO v_total FROM public.goal_contributions WHERE goal_id=r.goal_id AND contribution_status='confirmed';
-    IF r.frequency='weekly' THEN v_next:=r.next_run_at+interval '7 days';
+      VALUES(v_rule.goal_id,v_rule.user_id,v_rule.amount,'automatic','confirmed','Scheduled savings contribution',now()) RETURNING * INTO v_contribution;
+    SELECT COALESCE(SUM(amount),0) INTO v_total FROM public.goal_contributions WHERE goal_id=v_rule.goal_id AND contribution_status='confirmed';
+    IF v_rule.frequency='weekly' THEN v_next:=v_rule.next_run_at+interval '7 days';
     ELSE v_next:=make_timestamptz(
-        EXTRACT(YEAR FROM r.next_run_at+interval '1 month')::integer,
-        EXTRACT(MONTH FROM r.next_run_at+interval '1 month')::integer,
-        LEAST(COALESCE(r.day_of_month,EXTRACT(DAY FROM r.next_run_at)::integer),
-          EXTRACT(DAY FROM (date_trunc('month',r.next_run_at+interval '2 months')-interval '1 day'))::integer),
-        EXTRACT(HOUR FROM r.next_run_at)::integer,EXTRACT(MINUTE FROM r.next_run_at)::integer,
-        EXTRACT(SECOND FROM r.next_run_at), 'UTC'); END IF;
+        EXTRACT(YEAR FROM v_rule.next_run_at+interval '1 month')::integer,
+        EXTRACT(MONTH FROM v_rule.next_run_at+interval '1 month')::integer,
+        LEAST(v_rule.day_of_month,
+          EXTRACT(DAY FROM (date_trunc('month',v_rule.next_run_at+interval '1 month')+interval '1 month'-interval '1 day'))::integer),
+        EXTRACT(HOUR FROM v_rule.next_run_at)::integer,EXTRACT(MINUTE FROM v_rule.next_run_at)::integer,
+        EXTRACT(SECOND FROM v_rule.next_run_at)::double precision, 'UTC'); END IF;
     UPDATE public.savings_goal_rules SET last_run_at=now(),next_run_at=v_next,updated_at=now()
-      WHERE id=r.id AND enabled=true;
+      WHERE id=v_rule.id AND enabled=true;
     v_count:=v_count+1;
   END LOOP;
   RETURN v_count;

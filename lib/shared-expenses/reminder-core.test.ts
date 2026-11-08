@@ -27,7 +27,7 @@ assert.deepEqual(calculateSavingsProgress(100, [
   { amount: 30, contribution_status: "confirmed" },
   { amount: 20, contribution_status: "pending" },
   { amount: 10, contribution_status: "reversed" },
-]), { currentAmount: 30, progressPercent: 30, isGoalMet: false, confirmedContributionCount: 1 });
+]), { currentAmount: 30, remainingAmount: 70, progressPercent: 30, isGoalMet: false, confirmedContributionCount: 1 });
 const scheduled = nextReminderTime(new Date("2026-11-08T04:00:00.000Z"), {
   initial_message_enabled: true, frequency_hours: 24, preferred_send_time: "10:00:00", timezone: "Asia/Kolkata",
 }, 1);

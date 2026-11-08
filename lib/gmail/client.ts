@@ -4,6 +4,11 @@ export const GMAIL_SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
 ];
 
+export function hasReadOnlyGmailScope(scope: string | null | undefined) {
+  const scopes = scope?.split(/\s+/).filter(Boolean) || [];
+  return scopes.length === 1 && scopes[0] === GMAIL_SCOPES[0];
+}
+
 export function getOAuth2Client() {
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
@@ -26,7 +31,6 @@ export function generateAuthUrl(state?: string): string {
   return oauth2Client.generateAuthUrl({
     access_type: "offline", // Essential to retrieve refresh_token
     prompt: "consent", // Force consent so refresh token is returned on re-auth
-    include_granted_scopes: true,
     scope: GMAIL_SCOPES,
     state,
   });

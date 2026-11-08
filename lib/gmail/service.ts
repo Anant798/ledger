@@ -1,6 +1,6 @@
 import { google } from "googleapis";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { GMAIL_SCOPES, getOAuth2Client } from "./client.ts";
+import { hasReadOnlyGmailScope, getOAuth2Client } from "./client.ts";
 import { encryptToken, decryptToken } from "./encryption.ts";
 import {
   buildGmailTransactionQuery,
@@ -8,6 +8,7 @@ import {
 } from "./bank-filters.ts";
 import { extractTransactionFromEmail } from "../email-parser/gemini.ts";
 import { normalizeTransactionDate } from "../email-parser/date.ts";
+import { classifyBankTransaction } from "./classification.ts";
 
 async function createAdminClient() {
   const { createAdminClient: createClient } = await import("../supabase/admin.ts");
@@ -52,7 +53,7 @@ export async function getFreshGmailClient(userId: string) {
   if (error || !tokenRecord) {
     throw new Error("Gmail integration not found for user.");
   }
-  if (!tokenRecord.scope?.split(/\s+/).includes(GMAIL_SCOPES[0])) {
+  if (!hasReadOnlyGmailScope(tokenRecord.scope)) {
     throw new Error("Gmail integration is missing the required read-only scope. Reconnect Gmail.");
   }
 
@@ -192,36 +193,31 @@ export async function processGmailMessage(
     `Subject: ${subjectHeader}\nFrom: ${fromHeader}\nDate: ${dateHeader}\n\n${emailBody}`
   );
 
-  if (!parsed.isTransaction || !parsed.amount || !parsed.direction) {
-    const { error } = await supabase.rpc("finish_processed_email", {
-      p_user_id: userId, p_message_id: messageId, p_status: "ignored_not_transaction",
-      p_reason: "Model evaluated as non-transaction or missing amount/direction",
-    });
-    if (error) throw error;
-
-    return {
-      messageId,
-      status: "ignored" as const,
-      reason: "Not a valid financial transaction according to model",
-    };
-  }
-
-  const bankName = parsed.bankName?.trim() || "Unknown Bank";
+  const bankName = parsed.bankName?.trim() || null;
   // payment_provider is the identity namespace used with external_reference
   // for deduplication. Keep it tied to the institution, not the transfer rail
   // (UPI/NEFT/etc. can be shared by unrelated banks).
-  const paymentProvider = bankName.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+  const paymentProvider = bankName?.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || null;
   const externalReference = parsed.referenceNumber?.trim() || null;
+  const normalizedDate = normalizeTransactionDate(parsed.transactionDate);
 
   const isUncertain =
     parsed.confidence < 0.75 ||
+    !parsed.isTransaction ||
+    !parsed.amount ||
+    !parsed.direction ||
     parsed.status !== "completed" ||
     !parsed.currency ||
     !parsed.bankName ||
-    !externalReference;
+    !externalReference ||
+    !parsed.merchantOrSender?.trim() ||
+    parsed.transactionDateSource !== "email" ||
+    !parsed.transactionDate ||
+    normalizedDate.precision !== "datetime" ||
+    !normalizedDate.value;
   const transactionType = parsed.transactionType;
+  const category = classifyBankTransaction({ merchant: parsed.merchantOrSender, description: subjectHeader, direction: parsed.direction });
 
-  const normalizedDate = normalizeTransactionDate(parsed.transactionDate);
   const occurredAt = normalizedDate.value
     ? (normalizedDate.precision === "date"
         ? `${normalizedDate.value}T12:00:00+05:30`
@@ -239,8 +235,9 @@ export async function processGmailMessage(
       p_review: {
         direction: parsed.direction,
         amount: parsed.amount,
-        currency_code: parsed.currency || "INR",
+        currency_code: parsed.currency,
         transaction_type: parsed.transactionType,
+        category,
         description: `Imported via Gmail: ${parsed.merchantOrSender || "Pending Review"}`,
         merchant_name: parsed.merchantOrSender,
         bank_name: bankName,
@@ -249,7 +246,18 @@ export async function processGmailMessage(
         external_reference: externalReference,
         upi_id: parsed.recipientOrSenderUpi,
         confidence: parsed.confidence,
-        uncertain_reason: `Confidence (${parsed.confidence}) or missing/uncertain banking metadata.`,
+        uncertain_reason: [
+          !parsed.isTransaction && "transaction classification is uncertain",
+          !parsed.amount && "amount is missing",
+          !parsed.direction && "transaction type/direction is missing",
+          !parsed.currency && "currency is missing",
+          !bankName && "bank is missing",
+          !externalReference && "reference number is missing",
+          !parsed.merchantOrSender?.trim() && "merchant or sender is missing",
+          (parsed.transactionDateSource !== "email" || !parsed.transactionDate || normalizedDate.precision !== "datetime" || !normalizedDate.value) && "transaction date/time needs confirmation",
+          parsed.status !== "completed" && `status is ${parsed.status}`,
+          parsed.confidence < 0.75 && `low extraction confidence (${parsed.confidence})`,
+        ].filter(Boolean).join("; "),
         raw_snippet: emailBody.slice(0, 300),
         occurred_at: occurredAt,
       },
@@ -261,7 +269,7 @@ export async function processGmailMessage(
       messageId,
       status: "needs_review" as const,
       reviewId,
-      reason: `Confidence: ${parsed.confidence}`,
+      reason: `Needs confirmation: ${[!parsed.amount && "amount", !parsed.direction && "direction", !parsed.currency && "currency", !bankName && "bank", !externalReference && "reference", !parsed.merchantOrSender?.trim() && "merchant", (parsed.transactionDateSource !== "email" || !parsed.transactionDate || normalizedDate.precision !== "datetime" || !normalizedDate.value) && "date/time", parsed.status !== "completed" && "status", parsed.confidence < 0.75 && "confidence"].filter(Boolean).join(", ") || "transaction classification"}`,
     };
   }
 
@@ -271,6 +279,7 @@ export async function processGmailMessage(
     p_message_id: messageId,
     p_transaction: {
       transaction_type: transactionType,
+      category,
       direction: parsed.direction,
       amount: parsed.amount,
       currency_code: parsed.currency || "INR",

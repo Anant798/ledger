@@ -4,6 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { google } from "googleapis";
 import type { ParsedTransaction } from "../email-parser/schema.ts";
 import { processGmailMessage } from "./service.ts";
+import { hasReadOnlyGmailScope } from "./client.ts";
 import { createGmailOAuthState, verifyGmailOAuthState } from "./oauth-state.ts";
 
 const USER_ID = "c4f7c50a-cd20-47b7-bc68-46ced200d249";
@@ -50,7 +51,7 @@ function fakeGmail() {
 
 const transaction: ParsedTransaction = {
   isTransaction: true, transactionType: "payment", direction: "debit", amount: 120,
-  currency: "INR", transactionDate: null, transactionDateSource: "unknown",
+  currency: "INR", transactionDate: "2026-11-08T10:30:00+05:30", transactionDateSource: "email",
   merchantOrSender: "Cafe", recipientOrSenderUpi: null, bankName: "HDFC Bank",
   accountLast4: "1234", referenceNumber: "UPI/123456", status: "completed", confidence: 0.99,
 };
@@ -60,6 +61,12 @@ test("Gmail OAuth state is signed, age limited and user scoped", () => {
   assert.equal(verifyGmailOAuthState(state, SECRET, 1_001_000).userId, USER_ID);
   assert.throws(() => verifyGmailOAuthState(`${state}x`, SECRET, 1_001_000), /signature|state/i);
   assert.throws(() => verifyGmailOAuthState(state, SECRET, 1_700_000), /expired/i);
+});
+
+test("Gmail connection accepts only the readonly mail scope", () => {
+  assert.equal(hasReadOnlyGmailScope("https://www.googleapis.com/auth/gmail.readonly"), true);
+  assert.equal(hasReadOnlyGmailScope("https://www.googleapis.com/auth/gmail.modify"), false);
+  assert.equal(hasReadOnlyGmailScope("https://www.googleapis.com/auth/gmail.readonly https://mail.google.com/"), false);
 });
 
 test("Gmail import uses an atomic transaction/event RPC after claiming a message", async () => {
@@ -72,6 +79,7 @@ test("Gmail import uses an atomic transaction/event RPC after claiming a message
   assert.equal(imported.transaction_type, "payment");
   assert.equal(imported.payment_provider, "hdfc_bank");
   assert.equal(imported.external_reference, "UPI/123456");
+  assert.equal(imported.category, "Food & dining");
 });
 
 test("uncertain and non-completed alerts atomically create review items", async () => {
@@ -97,6 +105,32 @@ test("confident alerts without a bank reference stay in review and use bank iden
   const review = supabase.calls[1]?.args.p_review as Record<string, unknown>;
   assert.equal(review.payment_provider, "hdfc_bank");
   assert.equal(review.external_reference, null);
+});
+
+test("likely bank alerts with incomplete extraction are kept in review instead of discarded", async () => {
+  const supabase = fakeSupabase();
+  const incomplete = { ...transaction, amount: null, direction: null, currency: null, merchantOrSender: null, transactionDate: null, transactionDateSource: "unknown" } as ParsedTransaction;
+  const result = await processGmailMessage(supabase as unknown as SupabaseClient, fakeGmail() as unknown as ReturnType<typeof google.gmail>, USER_ID, "incomplete-alert", async () => incomplete);
+  assert.equal(result.status, "needs_review");
+  assert.equal(supabase.calls[1]?.name, "complete_gmail_review");
+  const review = supabase.calls[1]?.args.p_review as Record<string, unknown>;
+  assert.equal(review.amount, null);
+  assert.equal(review.direction, null);
+  assert.match(String(review.uncertain_reason), /amount is missing/);
+  assert.match(String(review.uncertain_reason), /transaction date\/time needs confirmation/);
+});
+
+test("date-only and received-at timestamps are queued for confirmation", async () => {
+  const supabase = fakeSupabase();
+  const dateOnly = { ...transaction, transactionDate: "2026-11-08", transactionDateSource: "received_at" } as ParsedTransaction;
+  const result = await processGmailMessage(supabase as unknown as SupabaseClient, fakeGmail() as unknown as ReturnType<typeof google.gmail>, USER_ID, "date-needs-confirmation", async () => dateOnly);
+  assert.equal(result.status, "needs_review");
+  assert.equal(supabase.calls[1]?.name, "complete_gmail_review");
+
+  const dateOnlySupabase = fakeSupabase();
+  const dateOnlyEmail = { ...transaction, transactionDate: "2026-11-08", transactionDateSource: "email" } as ParsedTransaction;
+  const dateOnlyResult = await processGmailMessage(dateOnlySupabase as unknown as SupabaseClient, fakeGmail() as unknown as ReturnType<typeof google.gmail>, USER_ID, "date-only-alert", async () => dateOnlyEmail);
+  assert.equal(dateOnlyResult.status, "needs_review");
 });
 
 test("duplicate delivery claims do not retrieve or process the Gmail message again", async () => {

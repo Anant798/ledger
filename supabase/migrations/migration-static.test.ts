@@ -10,10 +10,12 @@ const batchB = await readFile(join(directory, "20261108000100_expense_reminders.
 const expenseGroups = await readFile(join(directory, "20261108000200_expense_groups_module.sql"), "utf8");
 const repayments = await readFile(join(directory, "20261108000300_repayments_settlements.sql"), "utf8");
 const savings = await readFile(join(directory, "20261108000400_savings_goals_module.sql"), "utf8");
-const allSql = `${batchA}\n${batchB}\n${expenseGroups}\n${repayments}\n${savings}`;
+const transactions = await readFile(join(directory, "20261108000500_transaction_management.sql"), "utf8");
+const gmailCompletion = await readFile(join(directory, "20261108000600_gmail_bank_alert_completion.sql"), "utf8");
+const allSql = `${batchA}\n${batchB}\n${expenseGroups}\n${repayments}\n${savings}\n${transactions}\n${gmailCompletion}`;
 
 test("migration versions are unique and ordered", () => {
-  const versions = ["20261108000000", "20261108000100", "20261108000200", "20261108000300", "20261108000400"];
+  const versions = ["20261108000000", "20261108000100", "20261108000200", "20261108000300", "20261108000400", "20261108000500", "20261108000600"];
   assert.equal(new Set(versions).size, versions.length);
   assert.deepEqual([...versions].sort(), versions);
 });
@@ -116,11 +118,39 @@ test("savings module keeps audit history, schedules recurring rules, and scopes 
   assert.match(savings, /ADD COLUMN IF NOT EXISTS deleted_at timestamptz/i);
   assert.match(savings, /CREATE TABLE IF NOT EXISTS public\.savings_contribution_events/i);
   assert.match(savings, /CREATE TABLE IF NOT EXISTS public\.savings_goal_rules/i);
-  assert.match(savings, /FOR UPDATE OF rule SKIP LOCKED/i);
+  assert.match(savings, /FOR UPDATE SKIP LOCKED/i);
   assert.match(savings, /IF auth\.uid\(\) IS DISTINCT FROM p_user_id THEN RAISE EXCEPTION 'not authorized'/i);
   assert.match(savings, /manually_reversed_at IS NULL/i);
+  assert.match(savings, /greatest\(COALESCE\(gc\.source_amount,gc\.amount\)-v_refunded,0\)/i);
   assert.match(savings, /REVOKE ALL ON FUNCTION public\.run_due_savings_goal_rules\(integer\) FROM PUBLIC,anon,authenticated/i);
   assert.match(savings, /GRANT EXECUTE ON FUNCTION public\.run_due_savings_goal_rules\(integer\) TO service_role/i);
   assert.match(savings, /Savings goal completed/i);
   assert.doesNotMatch(savings, /DELETE\s+FROM\s+public\.(savings_goals|goal_contributions)/i);
+});
+
+test("transaction management adds fields safely, scopes RPCs, and preserves history on archive", () => {
+  assert.match(transactions, /ADD COLUMN IF NOT EXISTS category text/i);
+  assert.match(transactions, /ADD COLUMN IF NOT EXISTS payment_method text/i);
+  assert.match(transactions, /CREATE OR REPLACE FUNCTION public\.archive_transaction_with_event/i);
+  assert.match(transactions, /SET deleted_at=now\(\),status='cancelled'/i);
+  assert.match(transactions, /Transaction archived/i);
+  assert.match(transactions, /CREATE OR REPLACE FUNCTION public\.get_transaction_summary/i);
+  assert.match(transactions, /auth\.uid\(\) IS NOT NULL AND auth\.uid\(\) IS DISTINCT FROM p_user_id/i);
+  assert.match(transactions, /GROUP BY currency_code/i);
+  assert.match(transactions, /status NOT IN \('pending','failed','cancelled'\)/i);
+  assert.doesNotMatch(transactions, /DELETE\s+FROM\s+public\.transactions/i);
+});
+
+test("Gmail review migration retains incomplete alerts and resolves them through atomic owner-scoped RPCs", () => {
+  assert.match(gmailCompletion, /ALTER COLUMN direction DROP NOT NULL/i);
+  assert.match(gmailCompletion, /ALTER COLUMN amount DROP NOT NULL/i);
+  assert.match(gmailCompletion, /CREATE OR REPLACE FUNCTION public\.complete_gmail_review/i);
+  assert.match(gmailCompletion, /ON CONFLICT \(user_id,email_message_id\)[\s\S]*?DO NOTHING/i);
+  assert.match(gmailCompletion, /CREATE OR REPLACE FUNCTION public\.resolve_gmail_import_review/i);
+  assert.match(gmailCompletion, /auth\.uid\(\) <> p_user_id/i);
+  assert.match(gmailCompletion, /FOR UPDATE/i);
+  assert.match(gmailCompletion, /public\.approve_review_queue_item/i);
+  assert.match(gmailCompletion, /GRANT EXECUTE ON FUNCTION public\.resolve_gmail_import_review\(uuid,uuid,text,jsonb\) TO authenticated, service_role/i);
+  assert.match(gmailCompletion, /INSERT INTO public\.transactions[\s\S]*?occurred_at,category/i);
+  assert.match(gmailCompletion, /INSERT INTO public\.ledger_events/i);
 });

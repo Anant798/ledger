@@ -35,6 +35,8 @@ export const createTransactionSchema = z.object({
   external_reference: z.string().max(100).optional().nullable(),
   related_transaction_id: z.string().uuid().optional().nullable(),
   occurred_at: z.string().datetime({ offset: true }).optional(),
+  category: z.string().max(100).optional().nullable(),
+  payment_method: z.string().max(50).optional().nullable(),
 }).strict();
 
 export const updateTransactionSchema = z.object({
@@ -51,17 +53,24 @@ export const updateTransactionSchema = z.object({
   external_reference: z.string().max(100).optional().nullable(),
   related_transaction_id: z.string().uuid().optional().nullable(),
   occurred_at: z.string().datetime({ offset: true }).optional(),
+  category: z.string().max(100).optional().nullable(),
+  payment_method: z.string().max(50).optional().nullable(),
 }).strict();
 
 export const transactionQuerySchema = z.object({
   direction: directionEnum.optional(),
   status: transactionStatusEnum.optional(),
+  transaction_type: transactionTypeEnum.optional(),
+  category: z.string().max(100).optional(),
+  payment_method: z.string().max(50).optional(),
   // Accepts payment_provider directly, or source as an alias for client convenience
   payment_provider: z.string().optional(),
   source: z.string().optional(),
-  startDate: z.string().optional(),
-  endDate: z.string().optional(),
+  startDate: z.string().refine((value) => !Number.isNaN(Date.parse(value))).optional(),
+  endDate: z.string().refine((value) => !Number.isNaN(Date.parse(value))).optional(),
   search: z.string().optional(),
+  sort: z.enum(["occurred_at", "amount", "merchant_name", "created_at"]).default("occurred_at"),
+  sortDirection: z.enum(["asc", "desc"]).default("desc"),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });

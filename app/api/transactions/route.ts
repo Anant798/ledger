@@ -24,10 +24,16 @@ export async function GET(request: Request) {
     const parsedQuery = transactionQuerySchema.safeParse({
       direction: searchParams.get("direction") || undefined,
       status: searchParams.get("status") || undefined,
+      transaction_type: searchParams.get("transaction_type") || undefined,
+      category: searchParams.get("category") || undefined,
+      payment_method: searchParams.get("payment_method") || undefined,
+      payment_provider: searchParams.get("payment_provider") || undefined,
       source: searchParams.get("source") || undefined,
       startDate: searchParams.get("startDate") || undefined,
       endDate: searchParams.get("endDate") || undefined,
       search: searchParams.get("search") || undefined,
+      sort: searchParams.get("sort") || undefined,
+      sortDirection: searchParams.get("sortDirection") || undefined,
       page: searchParams.get("page") || undefined,
       limit: searchParams.get("limit") || undefined,
     });

@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --experimental-strip-types --test lib/gmail/service.test.ts lib/gmail/encryption.test.ts lib/shared-expenses/reminder-worker.test.ts lib/shared-expenses/expense-groups.test.ts lib/savings/calculations.test.ts supabase/migrations/migration-static.test.ts && node --experimental-strip-types lib/email-parser/batch-a.test.ts && node --experimental-strip-types lib/shared-expenses/reminder-core.test.ts && node --experimental-strip-types lib/shared-expenses/batch-b-calculations.test.ts"
+    "test": "node --experimental-strip-types --test lib/gmail/service.test.ts lib/gmail/classification.test.ts lib/gmail/encryption.test.ts lib/shared-expenses/reminder-worker.test.ts lib/shared-expenses/expense-groups.test.ts lib/savings/calculations.test.ts lib/transactions/validation.test.ts supabase/migrations/migration-static.test.ts && node --experimental-strip-types lib/email-parser/batch-a.test.ts && node --experimental-strip-types lib/shared-expenses/reminder-core.test.ts && node --experimental-strip-types lib/shared-expenses/batch-b-calculations.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.32.0",

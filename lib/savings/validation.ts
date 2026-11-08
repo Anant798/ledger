@@ -6,7 +6,7 @@ export const createSavingsGoalSchema = z.object({
   target_amount: z.number().positive().finite(),
   currency_code: z.string().default("INR"),
   target_date: z.string().date().optional().nullable(),
-  status: z.enum(["active", "completed", "paused", "cancelled"]).default("active"),
+  status: z.enum(["active", "paused", "cancelled"]).default("active"),
 });
 
 export const updateSavingsGoalSchema = z.object({

@@ -12,8 +12,12 @@ const resolveReviewSchema = z.object({
       payment_provider: z.string().optional(),
       amount: z.number().positive().optional(),
       direction: z.enum(["debit", "credit"]).optional(),
+      currency_code: z.string().regex(/^[A-Za-z]{3}$/).optional(),
+      transaction_type: z.enum(["payment", "refund", "reversal", "shared_expense", "repayment", "manual", "other"]).optional(),
+      category: z.string().max(100).optional(),
+      occurred_at: z.string().datetime().optional(),
       description: z.string().optional(),
-    })
+    }).strict()
     .optional(),
 });
 
@@ -76,42 +80,23 @@ export async function POST(request: Request) {
 
     const { reviewId, action, updates } = parsed.data;
 
-    if (action === "reject") {
-      const { data: result, error: rejectError } = await supabase.rpc("reject_review_queue_item", {
-        p_user_id: user.id,
-        p_review_id: reviewId,
-      });
-      if (rejectError) return NextResponse.json({ error: "Atomic review rejection is unavailable. Apply the pending Batch A migration.", details: rejectError.message }, { status: 503 });
-      if (!result?.success) return NextResponse.json({ error: result?.error || "Review item not found or already processed" }, { status: result?.status || 409 });
-
-      return NextResponse.json({
-        message: "Import item rejected",
-        item: result,
-      });
-    }
-
-    // Action === 'approve':
-    // Must be executed atomically via the approve_review_queue_item SQL RPC.
-    // Non-atomic fallback removed to guarantee consistency and eliminate partial writes.
-    const { data: rpcResult, error: rpcError } = await supabase.rpc(
-      "approve_review_queue_item",
-      {
-        p_user_id: user.id,
-        p_review_id: reviewId,
-        p_amount: updates?.amount || null,
-        p_direction: updates?.direction || null,
-        p_merchant_name: updates?.merchant_name || null,
-        p_bank_name: updates?.bank_name || null,
-        p_payment_provider: updates?.payment_provider || null,
-        p_description: updates?.description || null,
-      }
-    );
+    const { data: rpcResult, error: rpcError } = await supabase.rpc("resolve_gmail_import_review", {
+      p_user_id: user.id,
+      p_review_id: reviewId,
+      p_action: action,
+      p_corrections: updates ? {
+        ...updates,
+        ...(updates.bank_name?.trim() && !updates.payment_provider?.trim()
+          ? { payment_provider: updates.bank_name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") }
+          : {}),
+      } : {},
+    });
 
     if (rpcError) {
       console.error("Atomic approval RPC error:", rpcError);
       return NextResponse.json(
         {
-          error: "Atomic transaction approval is temporarily unavailable. Please run the required database migration for approve_review_queue_item.",
+          error: "Atomic Gmail review resolution is temporarily unavailable. Apply the pending Gmail integration migration.",
           details: rpcError.message,
         },
         { status: 503 }

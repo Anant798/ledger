@@ -9,7 +9,7 @@ assert.deepEqual(calculateSplit(10, "custom", [2, 8]), [2, 8]);
 const balance = calculateShareBalance(10, [{ amount: 3, payment_status: "confirmed" }, { amount: 2, payment_status: "pending" }]);
 assert.equal(balance.outstandingBalance, 7);
 assert.equal(balance.settlementHistory.length, 1);
-assert.deepEqual(calculateSavingsProgress(100, [{ amount: 40, contribution_status: "confirmed" }, { amount: 30, contribution_status: "pending" }]), { currentAmount: 40, progressPercent: 40, isGoalMet: false, confirmedContributionCount: 1 });
+assert.deepEqual(calculateSavingsProgress(100, [{ amount: 40, contribution_status: "confirmed" }, { amount: 30, contribution_status: "pending" }]), { currentAmount: 40, remainingAmount: 60, progressPercent: 40, isGoalMet: false, confirmedContributionCount: 1 });
 const scheduled = { status: "scheduled" as const, attempts: 0, maxAttempts: 2, dueAt: 10 };
 const claimed = claimReminder(scheduled, 10, 100)!;
 assert.equal(claimReminder(claimed, 20, 100), null);
