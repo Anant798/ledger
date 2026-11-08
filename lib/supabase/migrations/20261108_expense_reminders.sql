@@ -2,6 +2,52 @@
 CREATE UNIQUE INDEX IF NOT EXISTS uq_repayments_idempotency_reference
   ON public.repayments(user_id, expense_share_id, external_reference)
   WHERE external_reference ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$';
+ALTER TABLE public.goal_contributions ADD COLUMN IF NOT EXISTS idempotency_key uuid;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_goal_contributions_automated_idempotency
+  ON public.goal_contributions(user_id, goal_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION public.record_shared_expense_repayment(
+  p_user_id uuid, p_share_id uuid, p_amount numeric, p_currency_code text,
+  p_payment_method text, p_payment_provider text, p_external_reference text
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_share public.expense_shares; v_existing public.repayments; v_paid numeric; v_remaining numeric; v_repayment public.repayments;
+BEGIN
+  SELECT * INTO v_share FROM public.expense_shares WHERE id=p_share_id AND user_id=p_user_id FOR UPDATE;
+  IF NOT FOUND OR NOT EXISTS (SELECT 1 FROM public.expense_groups WHERE id=v_share.expense_group_id AND user_id=p_user_id) THEN
+    RETURN jsonb_build_object('success',false,'error','Expense share not found or access denied');
+  END IF;
+  IF p_external_reference IS NOT NULL THEN
+    SELECT * INTO v_existing FROM public.repayments WHERE user_id=p_user_id AND expense_share_id=p_share_id AND external_reference=p_external_reference LIMIT 1;
+    IF FOUND THEN RETURN jsonb_build_object('success',true,'result',jsonb_build_object('repayment',to_jsonb(v_existing),'duplicate',true,'remainingBalance',greatest(0,v_share.amount_owed-(SELECT COALESCE(SUM(amount),0) FROM public.repayments WHERE expense_share_id=p_share_id AND payment_status='confirmed')))); END IF;
+  END IF;
+  IF p_amount <= 0 THEN RETURN jsonb_build_object('success',false,'error','Repayment amount must be positive'); END IF;
+  SELECT COALESCE(SUM(amount),0) INTO v_paid FROM public.repayments WHERE expense_share_id=p_share_id AND payment_status='confirmed';
+  v_remaining := greatest(0,v_share.amount_owed-v_paid);
+  IF p_amount > v_remaining + 0.01 THEN RETURN jsonb_build_object('success',false,'error','Repayment exceeds outstanding balance'); END IF;
+  INSERT INTO public.repayments(expense_share_id,user_id,amount,currency_code,payment_method,payment_status,confirmation_source,payment_provider,external_reference,confirmed_at)
+  VALUES(p_share_id,p_user_id,p_amount,p_currency_code,p_payment_method,'confirmed','manual_recorded',p_payment_provider,p_external_reference,now()) RETURNING * INTO v_repayment;
+  INSERT INTO public.repayment_events(repayment_id,user_id,event_type,event_source,metadata)
+  VALUES(v_repayment.id,p_user_id,'repayment_confirmed','manual',jsonb_build_object('expense_share_id',p_share_id,'amount',p_amount,'remaining_balance',greatest(0,v_remaining-p_amount)));
+  RETURN jsonb_build_object('success',true,'result',jsonb_build_object('repayment',to_jsonb(v_repayment),'remainingBalance',greatest(0,v_remaining-p_amount),'isShareSettled',v_paid+p_amount>=v_share.amount_owed-0.01));
+END; $$;
+REVOKE ALL ON FUNCTION public.record_shared_expense_repayment(uuid,uuid,numeric,text,text,text,text) FROM PUBLIC,anon;
+GRANT EXECUTE ON FUNCTION public.record_shared_expense_repayment(uuid,uuid,numeric,text,text,text,text) TO authenticated,service_role;
+
+CREATE OR REPLACE FUNCTION public.add_automated_goal_contribution(
+  p_user_id uuid, p_goal_id uuid, p_amount numeric, p_notes text, p_idempotency_key uuid
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_existing public.goal_contributions; v_new public.goal_contributions;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.savings_goals WHERE id=p_goal_id AND user_id=p_user_id) THEN RAISE EXCEPTION 'Goal not found or access denied'; END IF;
+  SELECT * INTO v_existing FROM public.goal_contributions WHERE user_id=p_user_id AND goal_id=p_goal_id AND idempotency_key=p_idempotency_key;
+  IF FOUND THEN RETURN to_jsonb(v_existing); END IF;
+  INSERT INTO public.goal_contributions(goal_id,user_id,amount,contribution_source,contribution_status,notes,contributed_at,idempotency_key)
+  VALUES(p_goal_id,p_user_id,p_amount,'automated','confirmed',p_notes,now(),p_idempotency_key) RETURNING * INTO v_new;
+  RETURN to_jsonb(v_new);
+END; $$;
+REVOKE ALL ON FUNCTION public.add_automated_goal_contribution(uuid,uuid,numeric,text,uuid) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.add_automated_goal_contribution(uuid,uuid,numeric,text,uuid) TO service_role;
 CREATE TABLE IF NOT EXISTS public.expense_reminders (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -43,10 +89,15 @@ DECLARE v_count integer;
 BEGIN
   IF auth.uid() IS NOT NULL AND auth.uid() <> p_user_id THEN RAISE EXCEPTION 'not authorized'; END IF;
   INSERT INTO public.expense_reminders(user_id, expense_share_id, next_attempt_at, max_attempts)
-  SELECT p_user_id, sh.id, now(), COALESCE(rs.max_attempts,5)
+  SELECT p_user_id, sh.id,
+    CASE WHEN COALESCE((SELECT MAX(er.reminder_sequence) FROM public.expense_reminders er WHERE er.expense_share_id=sh.id),0)=0
+      THEN ((now() AT TIME ZONE rs.timezone)::date + rs.preferred_send_time)::timestamp AT TIME ZONE rs.timezone
+      ELSE now() END,
+    COALESCE(rs.max_attempts,5)
   FROM public.expense_shares sh JOIN public.expense_groups eg ON eg.id=sh.expense_group_id AND eg.user_id=p_user_id
   JOIN public.reminder_settings rs ON rs.user_id=p_user_id AND rs.enabled=true
   WHERE sh.user_id=p_user_id AND sh.email IS NOT NULL
+    AND (COALESCE((SELECT MAX(er.reminder_sequence) FROM public.expense_reminders er WHERE er.expense_share_id=sh.id),0)>0 OR rs.initial_message_enabled=true)
     AND (SELECT COALESCE(SUM(r.amount),0) FROM public.repayments r WHERE r.expense_share_id=sh.id AND r.payment_status='confirmed') < sh.amount_owed - 0.01
     AND NOT EXISTS (SELECT 1 FROM public.expense_reminders er WHERE er.expense_share_id=sh.id AND er.status IN ('scheduled','sending'))
     AND (SELECT COALESCE(MAX(er.reminder_sequence),0) FROM public.expense_reminders er WHERE er.expense_share_id=sh.id) < rs.max_reminders

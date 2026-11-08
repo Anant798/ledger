@@ -161,7 +161,8 @@ export class SavingsService {
     userId: string,
     goalId: string,
     amount: number,
-    notes?: string
+    notes?: string,
+    idempotencyKey?: string
   ) {
     const adminSupabase = createAdminClient();
 
@@ -177,20 +178,12 @@ export class SavingsService {
       throw new Error("Goal not found or access denied.");
     }
 
-    const { data, error } = await adminSupabase
-      .from("goal_contributions")
-      .insert({
-        goal_id: goalId,
-        user_id: userId,
-        amount,
-        contribution_source: "automated",
-        contribution_status: "confirmed",
-        notes: notes || "Automated savings contribution from synced transaction",
-        contributed_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
-
+    if (!idempotencyKey || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) throw new Error("Automated contributions require a valid source transaction UUID as idempotency key.");
+    const { data, error } = await adminSupabase.rpc("add_automated_goal_contribution", {
+      p_user_id: userId, p_goal_id: goalId, p_amount: amount,
+      p_notes: notes || "Automated savings contribution from synced transaction",
+      p_idempotency_key: idempotencyKey,
+    });
     if (error) throw error;
     return data;
   }

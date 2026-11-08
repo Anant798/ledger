@@ -4,6 +4,7 @@ import {
   RecordRepaymentInput,
 } from "./validation";
 import { calculateShareBalance, calculateSplit } from "./calculations";
+import { resolveOwnerId } from "./integration-helpers";
 type ShareRow = { amount_owed: number | string; repayments?: Array<{ amount: number | string | null; payment_status: string }>; totalRepaid?: number; outstandingBalance?: number; isSettled?: boolean; [key: string]: unknown };
 type RepaymentRow = { amount: number | string | null; payment_status: string };
 
@@ -164,72 +165,25 @@ export class SharedExpensesService {
       .eq("id", input.expense_share_id)
       .single();
 
-    if (shareErr || !share || !Array.isArray(share.group) || share.group[0]?.user_id !== userId) {
+    if (shareErr || !share || resolveOwnerId(share.group) !== userId) {
       throw new Error("Expense share not found or access denied.");
-    }
-
-    const amountOwed = Number(share.amount_owed || 0);
-    const alreadyRepaid = ((share.repayments || []) as RepaymentRow[])
-      .filter((r) => r.payment_status === "confirmed")
-      .reduce((sum, r) => sum + Number(r.amount || 0), 0);
-
-    const remainingOwed = Math.max(0, amountOwed - alreadyRepaid);
-
-    if (input.idempotency_key) {
-      const { data: existing, error: duplicateError } = await supabase.from("repayments").select("*").eq("user_id", userId).eq("expense_share_id", input.expense_share_id).eq("external_reference", input.idempotency_key).maybeSingle();
-      if (duplicateError) throw duplicateError;
-      if (existing) return { repayment: existing, remainingBalance: remainingOwed, isShareSettled: remainingOwed <= 0.01, duplicate: true };
     }
 
     if (input.amount <= 0) {
       throw new Error("Repayment amount must be positive.");
     }
-
-    if (input.amount > remainingOwed + 0.01) {
-      throw new Error(
-        `Repayment amount (${input.amount}) exceeds outstanding balance (${remainingOwed.toFixed(2)}).`
-      );
-    }
-
-    // Insert repayment
-    const { data: repayment, error: repErr } = await supabase
-      .from("repayments")
-      .insert({
-        expense_share_id: input.expense_share_id,
-        user_id: userId,
-        amount: input.amount,
-        currency_code: input.currency_code,
-        payment_method: input.payment_method,
-        payment_status: "confirmed",
-        confirmation_source: "manual_recorded",
-        payment_provider: input.payment_provider || null,
-        external_reference: input.idempotency_key || input.external_reference || null,
-        confirmed_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
-
-    if (repErr) throw repErr;
-
-    // Log audit event to repayment_events
-    const { error: auditError } = await supabase.from("repayment_events").insert({
-      repayment_id: repayment.id,
-      user_id: userId,
-      event_type: "repayment_confirmed",
-      event_source: "manual",
-      metadata: {
-        expense_share_id: input.expense_share_id,
-        amount: input.amount,
-        remaining_balance: Math.max(0, remainingOwed - input.amount),
-      },
+    const { data, error } = await supabase.rpc("record_shared_expense_repayment", {
+      p_user_id: userId,
+      p_share_id: input.expense_share_id,
+      p_amount: input.amount,
+      p_currency_code: input.currency_code,
+      p_payment_method: input.payment_method,
+      p_payment_provider: input.payment_provider || null,
+      p_external_reference: input.idempotency_key || input.external_reference || null,
     });
-    if (auditError) throw auditError;
-
-    return {
-      repayment,
-      remainingBalance: Math.max(0, remainingOwed - input.amount),
-      isShareSettled: alreadyRepaid + input.amount >= amountOwed - 0.01,
-    };
+    if (error) throw error;
+    if (!data?.success) throw new Error(data?.error || "Unable to record repayment");
+    return data.result;
   }
 
   /**
