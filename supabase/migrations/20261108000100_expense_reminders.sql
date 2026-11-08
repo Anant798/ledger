@@ -2,14 +2,17 @@
 -- This file is prepared for review only and must not be applied automatically.
 
 ALTER TABLE public.expense_shares ADD COLUMN IF NOT EXISTS participant_user_id uuid REFERENCES auth.users(id) ON DELETE SET NULL;
-CREATE INDEX IF NOT EXISTS idx_expense_shares_participant_user_id
+CREATE INDEX idx_expense_shares_participant_user_id
   ON public.expense_shares(participant_user_id) WHERE participant_user_id IS NOT NULL;
 
-CREATE OR REPLACE FUNCTION public.next_expense_reminder_time(
+CREATE FUNCTION public.next_expense_reminder_time(
   p_after timestamptz, p_preferred_send_time time, p_timezone text
 ) RETURNS timestamptz LANGUAGE plpgsql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_local timestamp; v_candidate timestamp;
 BEGIN
+  IF p_timezone IS NULL OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names WHERE name = p_timezone) THEN
+    RAISE EXCEPTION 'invalid reminder timezone: %', p_timezone USING ERRCODE = '22023';
+  END IF;
   v_local := p_after AT TIME ZONE p_timezone;
   v_candidate := date_trunc('day', v_local) + p_preferred_send_time;
   IF v_candidate < v_local THEN v_candidate := v_candidate + interval '1 day'; END IF;
@@ -18,7 +21,7 @@ END; $$;
 
 -- Application requests already carry UUID idempotency keys. Keep the existing
 -- external_reference column and protect retries without changing old rows.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_repayments_idempotency_reference
+CREATE UNIQUE INDEX uq_repayments_idempotency_reference
   ON public.repayments(user_id, expense_share_id, external_reference)
   WHERE external_reference ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$';
 
@@ -30,16 +33,16 @@ DO $$ BEGIN
       FOREIGN KEY (transaction_id) REFERENCES public.transactions(id) ON DELETE SET NULL;
   END IF;
 END $$;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_goal_contributions_automatic_idempotency
+CREATE UNIQUE INDEX uq_goal_contributions_automatic_idempotency
   ON public.goal_contributions(user_id, goal_id, idempotency_key)
   WHERE idempotency_key IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_goal_contributions_transaction
+CREATE UNIQUE INDEX uq_goal_contributions_transaction
   ON public.goal_contributions(user_id, goal_id, transaction_id)
   WHERE transaction_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_goal_contributions_transaction_id
+CREATE INDEX idx_goal_contributions_transaction_id
   ON public.goal_contributions(transaction_id) WHERE transaction_id IS NOT NULL;
 
-CREATE OR REPLACE FUNCTION public.record_shared_expense_repayment(
+CREATE FUNCTION public.record_shared_expense_repayment(
   p_user_id uuid, p_share_id uuid, p_amount numeric, p_currency_code text,
   p_payment_method text, p_payment_provider text, p_external_reference text
 ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
@@ -105,7 +108,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.record_shared_expense_repayment(uuid,uuid,numeric,text,text,text,text) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.record_shared_expense_repayment(uuid,uuid,numeric,text,text,text,text) TO authenticated, service_role;
 
-CREATE OR REPLACE FUNCTION public.create_shared_expense_group(p_user_id uuid,p_group jsonb,p_shares jsonb)
+CREATE FUNCTION public.create_shared_expense_group(p_user_id uuid,p_group jsonb,p_shares jsonb)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_group public.expense_groups; v_shares jsonb; v_sum numeric;
 BEGIN
@@ -132,7 +135,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.create_shared_expense_group(uuid,jsonb,jsonb) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.create_shared_expense_group(uuid,jsonb,jsonb) TO authenticated, service_role;
 
-CREATE OR REPLACE FUNCTION public.add_automated_goal_contribution(
+CREATE FUNCTION public.add_automated_goal_contribution(
   p_user_id uuid, p_goal_id uuid, p_amount numeric, p_notes text, p_idempotency_key uuid
 ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_contribution public.goal_contributions;
@@ -158,7 +161,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.add_automated_goal_contribution(uuid,uuid,numeric,text,uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.add_automated_goal_contribution(uuid,uuid,numeric,text,uuid) TO service_role;
 
-CREATE OR REPLACE FUNCTION public.add_transaction_goal_contribution(
+CREATE FUNCTION public.add_transaction_goal_contribution(
   p_user_id uuid,p_goal_id uuid,p_transaction_id uuid,p_amount numeric,p_notes text
 ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_contribution public.goal_contributions;
@@ -182,28 +185,43 @@ END; $$;
 REVOKE ALL ON FUNCTION public.add_transaction_goal_contribution(uuid,uuid,uuid,numeric,text) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.add_transaction_goal_contribution(uuid,uuid,uuid,numeric,text) TO authenticated, service_role;
 
-CREATE OR REPLACE FUNCTION public.reverse_linked_goal_contributions()
+CREATE FUNCTION public.reverse_linked_goal_contributions()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE v_source_id uuid;
 BEGIN
   IF TG_OP='DELETE' THEN
-    UPDATE public.goal_contributions SET contribution_status='reversed'
-      WHERE transaction_id=OLD.id AND contribution_status='confirmed';
+    IF OLD.transaction_type NOT IN ('refund','reversal') THEN
+      UPDATE public.goal_contributions SET contribution_status='reversed'
+        WHERE transaction_id=OLD.id AND contribution_status='confirmed';
+    ELSE
+      PERFORM public.reconcile_goal_contribution_refunds(OLD.related_transaction_id);
+    END IF;
     RETURN OLD;
   END IF;
-  IF NEW.transaction_type='reversal' AND NEW.related_transaction_id IS NOT NULL AND (
-    TG_OP='INSERT' OR (TG_OP='UPDATE' AND (OLD.transaction_type IS DISTINCT FROM NEW.transaction_type
-      OR OLD.related_transaction_id IS DISTINCT FROM NEW.related_transaction_id))) THEN
-    UPDATE public.goal_contributions SET contribution_status='reversed'
-      WHERE transaction_id=NEW.related_transaction_id AND contribution_status='confirmed';
+  IF TG_OP='UPDATE' AND OLD.transaction_type IN ('refund','reversal') THEN
+    PERFORM public.reconcile_goal_contribution_refunds(OLD.related_transaction_id);
   END IF;
-  IF TG_OP='UPDATE' AND NEW.status IN ('failed','cancelled','refunded') AND OLD.status IS DISTINCT FROM NEW.status THEN
-    UPDATE public.goal_contributions SET contribution_status='reversed'
-      WHERE transaction_id=NEW.id AND contribution_status='confirmed';
-  END IF;
+  IF NEW.transaction_type IN ('refund','reversal') THEN v_source_id := NEW.related_transaction_id;
+  ELSE v_source_id := NEW.id; END IF;
+  PERFORM public.reconcile_goal_contribution_refunds(v_source_id);
   RETURN NEW;
 END; $$;
 REVOKE ALL ON FUNCTION public.reverse_linked_goal_contributions() FROM PUBLIC, anon, authenticated;
-DROP TRIGGER IF EXISTS trg_reverse_linked_goal_contributions ON public.transactions;
+CREATE FUNCTION public.reconcile_goal_contribution_refunds(p_source_transaction_id uuid)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE v_source_status text; v_refunded numeric;
+BEGIN
+  IF p_source_transaction_id IS NULL THEN RETURN; END IF;
+  SELECT status INTO v_source_status FROM public.transactions WHERE id=p_source_transaction_id;
+  SELECT COALESCE(SUM(abs(amount)),0) INTO v_refunded FROM public.transactions
+    WHERE related_transaction_id=p_source_transaction_id
+      AND transaction_type IN ('refund','reversal') AND status='completed';
+  UPDATE public.goal_contributions gc SET contribution_status=CASE
+    WHEN v_source_status IN ('failed','cancelled','refunded') OR v_refunded >= gc.amount THEN 'reversed'
+    ELSE 'confirmed' END
+  WHERE gc.transaction_id=p_source_transaction_id AND gc.contribution_status IN ('confirmed','reversed');
+END; $$;
+REVOKE ALL ON FUNCTION public.reconcile_goal_contribution_refunds(uuid) FROM PUBLIC, anon, authenticated;
 CREATE TRIGGER trg_reverse_linked_goal_contributions
   AFTER INSERT OR UPDATE OR DELETE ON public.transactions
   FOR EACH ROW EXECUTE FUNCTION public.reverse_linked_goal_contributions();
@@ -219,12 +237,14 @@ ALTER TABLE public.reminder_logs
 ALTER TABLE public.reminder_settings
   ADD COLUMN IF NOT EXISTS max_attempts integer NOT NULL DEFAULT 5;
 DO $$
-DECLARE c record;
+DECLARE v_name text; v_count integer;
 BEGIN
-  FOR c IN SELECT conname FROM pg_constraint
-    WHERE conrelid = 'public.reminder_logs'::regclass AND contype = 'c'
-      AND pg_get_constraintdef(oid) ILIKE '%delivery_status%'
-  LOOP EXECUTE format('ALTER TABLE public.reminder_logs DROP CONSTRAINT %I', c.conname); END LOOP;
+  SELECT count(*), min(conname) INTO v_count, v_name FROM pg_constraint
+    WHERE conrelid='public.reminder_logs'::regclass AND contype='c'
+      AND regexp_replace(replace(lower(pg_get_constraintdef(oid)), '::text', ''), '[[:space:]''()\[\]]', '', 'g') =
+        'checkdelivery_status=anyarrayscheduled,sent,delivered,failed,cancelled';
+  IF v_count <> 1 THEN RAISE EXCEPTION 'Expected exactly one known reminder_logs.delivery_status check, found %; inspect constraints before applying', v_count; END IF;
+  EXECUTE format('ALTER TABLE public.reminder_logs DROP CONSTRAINT %I', v_name);
   ALTER TABLE public.reminder_logs ADD CONSTRAINT reminder_logs_delivery_status_batch_b_check
     CHECK (delivery_status IN ('scheduled', 'sending', 'sent', 'delivered', 'failed', 'cancelled'));
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.reminder_logs'::regclass AND conname = 'reminder_logs_attempt_state_batch_b_check') THEN
@@ -236,11 +256,11 @@ BEGIN
       CHECK (max_attempts BETWEEN 1 AND 10);
   END IF;
 END $$;
-CREATE INDEX IF NOT EXISTS idx_reminder_logs_due_batch_b
+CREATE INDEX idx_reminder_logs_due_batch_b
   ON public.reminder_logs(delivery_status, scheduled_for)
   WHERE delivery_status IN ('scheduled', 'sending');
 
-CREATE TABLE IF NOT EXISTS public.reminder_attempts (
+CREATE TABLE public.reminder_attempts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   reminder_log_id uuid NOT NULL REFERENCES public.reminder_logs(id) ON DELETE CASCADE,
   user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -251,8 +271,11 @@ CREATE TABLE IF NOT EXISTS public.reminder_attempts (
   attempted_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT uq_reminder_attempt_number UNIQUE (reminder_log_id, attempt_number)
 );
-CREATE INDEX IF NOT EXISTS idx_reminder_attempts_user ON public.reminder_attempts(user_id, attempted_at DESC);
+CREATE INDEX idx_reminder_attempts_user ON public.reminder_attempts(user_id, attempted_at DESC);
 ALTER TABLE public.reminder_attempts ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.reminder_attempts FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.reminder_attempts TO authenticated;
+GRANT ALL ON public.reminder_attempts TO service_role;
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'reminder_attempts' AND policyname = 'Users can view own reminder attempts') THEN
     CREATE POLICY "Users can view own reminder attempts" ON public.reminder_attempts
@@ -260,7 +283,7 @@ DO $$ BEGIN
   END IF;
 END $$;
 
-CREATE OR REPLACE FUNCTION public.schedule_expense_reminders(p_user_id uuid)
+CREATE FUNCTION public.schedule_expense_reminders(p_user_id uuid)
 RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_count integer;
 BEGIN
@@ -291,19 +314,23 @@ END; $$;
 REVOKE ALL ON FUNCTION public.schedule_expense_reminders(uuid) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.schedule_expense_reminders(uuid) TO authenticated, service_role;
 
-CREATE OR REPLACE FUNCTION public.schedule_all_expense_reminders()
+CREATE FUNCTION public.schedule_all_expense_reminders()
 RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_user uuid; v_total integer := 0;
 BEGIN
   FOR v_user IN SELECT user_id FROM public.reminder_settings WHERE enabled = true LOOP
-    v_total := v_total + public.schedule_expense_reminders(v_user);
+    BEGIN
+      v_total := v_total + public.schedule_expense_reminders(v_user);
+    EXCEPTION WHEN SQLSTATE '22023' THEN
+      RAISE WARNING 'Skipping expense reminders for user % due to invalid timezone setting', v_user;
+    END;
   END LOOP;
   RETURN v_total;
 END; $$;
 REVOKE ALL ON FUNCTION public.schedule_all_expense_reminders() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.schedule_all_expense_reminders() TO service_role;
 
-CREATE OR REPLACE FUNCTION public.reschedule_expense_reminders(p_user_id uuid)
+CREATE FUNCTION public.reschedule_expense_reminders(p_user_id uuid)
 RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_count integer;
 BEGIN
@@ -332,7 +359,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.reschedule_expense_reminders(uuid) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.reschedule_expense_reminders(uuid) TO authenticated, service_role;
 
-CREATE OR REPLACE FUNCTION public.cancel_user_expense_reminders(p_user_id uuid)
+CREATE FUNCTION public.cancel_user_expense_reminders(p_user_id uuid)
 RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_count integer;
 BEGIN
@@ -345,7 +372,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.cancel_user_expense_reminders(uuid) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.cancel_user_expense_reminders(uuid) TO authenticated, service_role;
 
-CREATE OR REPLACE FUNCTION public.claim_due_expense_reminders(p_limit integer DEFAULT 25, p_lease_seconds integer DEFAULT 300)
+CREATE FUNCTION public.claim_due_expense_reminders(p_limit integer DEFAULT 25, p_lease_seconds integer DEFAULT 300)
 RETURNS SETOF public.reminder_logs LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   -- Close attempts whose worker lease expired before a terminal retry, then
@@ -387,7 +414,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.claim_due_expense_reminders(integer,integer) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.claim_due_expense_reminders(integer,integer) TO service_role;
 
-CREATE OR REPLACE FUNCTION public.finish_expense_reminder_attempt(
+CREATE FUNCTION public.finish_expense_reminder_attempt(
   p_reminder_id uuid,p_outcome text,p_error text DEFAULT NULL,p_next_attempt_at timestamptz DEFAULT NULL
 ) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_reminder public.reminder_logs;
@@ -410,7 +437,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.finish_expense_reminder_attempt(uuid,text,text,timestamptz) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.finish_expense_reminder_attempt(uuid,text,text,timestamptz) TO service_role;
 
-CREATE OR REPLACE FUNCTION public.reconcile_expense_reminders_after_repayment_change()
+CREATE FUNCTION public.reconcile_expense_reminders_after_repayment_change()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_share uuid; v_owed numeric; v_paid numeric;
 BEGIN
@@ -421,8 +448,9 @@ BEGIN
   END IF;
   IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
 END; $$;
+REVOKE ALL ON FUNCTION public.reconcile_expense_reminders_after_repayment_change() FROM PUBLIC, anon, authenticated;
 
-CREATE OR REPLACE FUNCTION public.cancel_expense_reminders_for_share(p_share uuid)
+CREATE FUNCTION public.cancel_expense_reminders_for_share(p_share uuid)
 RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_owed numeric; v_paid numeric; v_count integer;
 BEGIN
@@ -439,12 +467,12 @@ BEGIN
   END IF;
   RETURN v_count;
 END; $$;
-DROP TRIGGER IF EXISTS trg_reconcile_expense_reminders_after_repayment_change ON public.repayments;
+REVOKE ALL ON FUNCTION public.cancel_expense_reminders_for_share(uuid) FROM PUBLIC, anon, authenticated;
 CREATE TRIGGER trg_reconcile_expense_reminders_after_repayment_change
   AFTER INSERT OR UPDATE OR DELETE ON public.repayments
   FOR EACH ROW EXECUTE FUNCTION public.reconcile_expense_reminders_after_repayment_change();
 
-CREATE OR REPLACE FUNCTION public.schedule_followup_expense_reminder()
+CREATE FUNCTION public.schedule_followup_expense_reminder()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_share public.expense_shares; v_settings public.reminder_settings;
 BEGIN
@@ -452,6 +480,10 @@ BEGIN
   SELECT * INTO v_share FROM public.expense_shares WHERE id = NEW.expense_share_id;
   SELECT * INTO v_settings FROM public.reminder_settings WHERE user_id = NEW.user_id AND enabled = true;
   IF v_share.id IS NULL OR v_settings.user_id IS NULL OR NEW.reminder_sequence >= v_settings.max_reminders THEN RETURN NEW; END IF;
+  IF v_settings.timezone IS NULL OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names WHERE name=v_settings.timezone) THEN
+    RAISE WARNING 'Skipping follow-up reminder for log % because its timezone is invalid', NEW.id;
+    RETURN NEW;
+  END IF;
   IF (SELECT COALESCE(SUM(amount), 0) FROM public.repayments
     WHERE expense_share_id = v_share.id AND payment_status = 'confirmed') >= v_share.amount_owed - 0.01 THEN RETURN NEW; END IF;
   INSERT INTO public.reminder_logs(user_id, expense_share_id, scheduled_for, delivery_status,
@@ -463,7 +495,7 @@ BEGIN
     ON CONFLICT (idempotency_key) DO NOTHING;
   RETURN NEW;
 END; $$;
-DROP TRIGGER IF EXISTS trg_schedule_followup_expense_reminder ON public.reminder_logs;
+REVOKE ALL ON FUNCTION public.schedule_followup_expense_reminder() FROM PUBLIC, anon, authenticated;
 CREATE TRIGGER trg_schedule_followup_expense_reminder
   AFTER UPDATE OF delivery_status ON public.reminder_logs FOR EACH ROW
   WHEN (NEW.delivery_status IN ('sent', 'delivered') AND OLD.delivery_status IS DISTINCT FROM NEW.delivery_status)

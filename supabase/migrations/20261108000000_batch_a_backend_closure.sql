@@ -5,30 +5,37 @@
 ALTER TABLE public.transactions ADD COLUMN IF NOT EXISTS bank_name text;
 ALTER TABLE public.transactions ADD COLUMN IF NOT EXISTS account_last4 text;
 
+-- Replace only the exact live constraints verified during reconciliation. Any
+-- custom/unknown constraint causes a safe abort for manual review.
 DO $$
-DECLARE c record;
+DECLARE v_name text; v_count integer;
 BEGIN
-  FOR c IN SELECT conname FROM pg_constraint
-    WHERE conrelid = 'public.transactions'::regclass AND contype = 'c'
-      AND pg_get_constraintdef(oid) ILIKE '%transaction_type%'
-  LOOP EXECUTE format('ALTER TABLE public.transactions DROP CONSTRAINT %I', c.conname); END LOOP;
+  SELECT count(*), min(conname) INTO v_count, v_name FROM pg_constraint
+    WHERE conrelid='public.transactions'::regclass AND contype='c'
+      AND regexp_replace(replace(lower(pg_get_constraintdef(oid)), '::text', ''), '[[:space:]''()\[\]]', '', 'g') =
+        'checktransaction_type=anyarraypayment,refund,shared_expense,repayment,manual';
+  IF v_count <> 1 THEN RAISE EXCEPTION 'Expected exactly one known transactions.transaction_type check, found %; inspect constraints before applying', v_count; END IF;
+  EXECUTE format('ALTER TABLE public.transactions DROP CONSTRAINT %I', v_name);
   ALTER TABLE public.transactions ADD CONSTRAINT transactions_type_batch_a_check
     CHECK (transaction_type IN ('payment', 'refund', 'shared_expense', 'repayment', 'manual', 'reversal', 'other'));
-  FOR c IN SELECT conname FROM pg_constraint
-    WHERE conrelid = 'public.alerts'::regclass AND contype = 'c'
-      AND pg_get_constraintdef(oid) ILIKE '%alert_type%'
-  LOOP EXECUTE format('ALTER TABLE public.alerts DROP CONSTRAINT %I', c.conname); END LOOP;
+
+  SELECT count(*), min(conname) INTO v_count, v_name FROM pg_constraint
+    WHERE conrelid='public.alerts'::regclass AND contype='c'
+      AND regexp_replace(replace(lower(pg_get_constraintdef(oid)), '::text', ''), '[[:space:]''()\[\]]', '', 'g') =
+        'checkalert_type=anyarraypayment_pending,refund_pending,repayment_due,goal_milestone,general';
+  IF v_count <> 1 THEN RAISE EXCEPTION 'Expected exactly one known alerts.alert_type check, found %; inspect constraints before applying', v_count; END IF;
+  EXECUTE format('ALTER TABLE public.alerts DROP CONSTRAINT %I', v_name);
   ALTER TABLE public.alerts ADD CONSTRAINT alerts_type_batch_a_check
     CHECK (alert_type IN ('payment_pending', 'refund_pending', 'repayment_due', 'goal_milestone', 'general', 'transaction_review'));
 END $$;
 
 -- A repeated reference from the same provider must not create a second import.
 -- Preflight existing data for duplicate nonempty references before applying.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_transactions_user_provider_reference
+CREATE UNIQUE INDEX uq_transactions_user_provider_reference
   ON public.transactions(user_id, payment_provider, external_reference)
   WHERE payment_provider IS NOT NULL AND external_reference IS NOT NULL AND external_reference <> '';
 
-CREATE TABLE IF NOT EXISTS public.server_oauth_tokens (
+CREATE TABLE public.server_oauth_tokens (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   provider text NOT NULL CHECK (provider = 'gmail'),
@@ -49,12 +56,13 @@ CREATE TABLE IF NOT EXISTS public.server_oauth_tokens (
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT uq_server_oauth_user_provider UNIQUE (user_id, provider)
 );
-CREATE INDEX IF NOT EXISTS idx_server_oauth_user_id ON public.server_oauth_tokens(user_id);
+-- The UNIQUE(user_id, provider) constraint already indexes user_id as its
+-- leading column; a separate user_id index is redundant.
 ALTER TABLE public.server_oauth_tokens ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON public.server_oauth_tokens FROM anon, authenticated;
+REVOKE ALL ON public.server_oauth_tokens FROM PUBLIC, anon, authenticated;
 GRANT ALL ON public.server_oauth_tokens TO service_role;
 
-CREATE TABLE IF NOT EXISTS public.processed_emails (
+CREATE TABLE public.processed_emails (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   message_id text NOT NULL,
@@ -69,20 +77,10 @@ CREATE TABLE IF NOT EXISTS public.processed_emails (
   created_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT uq_processed_emails_user_msg UNIQUE (user_id, message_id)
 );
-ALTER TABLE public.processed_emails ADD COLUMN IF NOT EXISTS processing_started_at timestamptz;
-DO $$
-DECLARE c record;
-BEGIN
-  FOR c IN SELECT conname FROM pg_constraint
-    WHERE conrelid = 'public.processed_emails'::regclass AND contype = 'c'
-      AND pg_get_constraintdef(oid) ILIKE '%status%'
-  LOOP EXECUTE format('ALTER TABLE public.processed_emails DROP CONSTRAINT %I', c.conname); END LOOP;
-  ALTER TABLE public.processed_emails ADD CONSTRAINT processed_emails_status_batch_a_check
-    CHECK (status IN ('processing', 'parsed', 'ignored_not_transaction', 'uncertain_queued', 'failed'));
-END $$;
-CREATE INDEX IF NOT EXISTS idx_processed_emails_user_msg ON public.processed_emails(user_id, message_id);
+-- uq_processed_emails_user_msg already supports this lookup; no duplicate index.
 ALTER TABLE public.processed_emails ENABLE ROW LEVEL SECURITY;
-REVOKE INSERT, UPDATE, DELETE ON public.processed_emails FROM anon, authenticated;
+REVOKE ALL ON public.processed_emails FROM PUBLIC, anon;
+REVOKE INSERT, UPDATE, DELETE ON public.processed_emails FROM authenticated;
 GRANT SELECT ON public.processed_emails TO authenticated;
 GRANT ALL ON public.processed_emails TO service_role;
 DO $$ BEGIN
@@ -92,7 +90,7 @@ DO $$ BEGIN
   END IF;
 END $$;
 
-CREATE TABLE IF NOT EXISTS public.import_review_queue (
+CREATE TABLE public.import_review_queue (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   email_message_id text,
@@ -119,12 +117,12 @@ CREATE TABLE IF NOT EXISTS public.import_review_queue (
   CONSTRAINT fk_import_review_processed_email FOREIGN KEY (user_id, email_message_id)
     REFERENCES public.processed_emails(user_id, message_id) ON DELETE CASCADE
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_import_review_user_email
+CREATE UNIQUE INDEX uq_import_review_user_email
   ON public.import_review_queue(user_id, email_message_id) WHERE email_message_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_import_review_user ON public.import_review_queue(user_id, review_status);
+CREATE INDEX idx_import_review_user ON public.import_review_queue(user_id, review_status);
 ALTER TABLE public.import_review_queue ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS "Users can update review items" ON public.import_review_queue;
-REVOKE INSERT, UPDATE, DELETE ON public.import_review_queue FROM anon, authenticated;
+REVOKE ALL ON public.import_review_queue FROM PUBLIC, anon;
+REVOKE INSERT, UPDATE, DELETE ON public.import_review_queue FROM authenticated;
 GRANT SELECT ON public.import_review_queue TO authenticated;
 GRANT ALL ON public.import_review_queue TO service_role;
 DO $$ BEGIN
@@ -141,11 +139,11 @@ DO $$ BEGIN
       FOREIGN KEY (import_review_id) REFERENCES public.import_review_queue(id) ON DELETE SET NULL;
   END IF;
 END $$;
-CREATE INDEX IF NOT EXISTS idx_alerts_import_review_batch_a ON public.alerts(import_review_id);
-CREATE INDEX IF NOT EXISTS idx_processed_emails_transaction_batch_a ON public.processed_emails(transaction_id);
-CREATE INDEX IF NOT EXISTS idx_import_review_created_transaction_batch_a ON public.import_review_queue(created_transaction_id);
+CREATE INDEX idx_alerts_import_review_batch_a ON public.alerts(import_review_id);
+CREATE INDEX idx_processed_emails_transaction_batch_a ON public.processed_emails(transaction_id);
+CREATE INDEX idx_import_review_created_transaction_batch_a ON public.import_review_queue(created_transaction_id);
 
-CREATE OR REPLACE FUNCTION public.claim_processed_email(
+CREATE FUNCTION public.claim_processed_email(
   p_user_id uuid, p_message_id text, p_history_id text, p_internal_date timestamptz, p_sender text, p_subject text
 ) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_claimed boolean;
@@ -164,7 +162,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.claim_processed_email(uuid,text,text,timestamptz,text,text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.claim_processed_email(uuid,text,text,timestamptz,text,text) TO service_role;
 
-CREATE OR REPLACE FUNCTION public.finish_processed_email(
+CREATE FUNCTION public.finish_processed_email(
   p_user_id uuid, p_message_id text, p_status text, p_reason text DEFAULT NULL
 ) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
@@ -177,7 +175,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.finish_processed_email(uuid,text,text,text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.finish_processed_email(uuid,text,text,text) TO service_role;
 
-CREATE OR REPLACE FUNCTION public.complete_gmail_import(
+CREATE FUNCTION public.complete_gmail_import(
   p_user_id uuid, p_message_id text, p_transaction jsonb, p_metadata jsonb DEFAULT '{}'::jsonb
 ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_email public.processed_emails; v_existing public.transactions; v_transaction public.transactions;
@@ -224,7 +222,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.complete_gmail_import(uuid,text,jsonb,jsonb) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.complete_gmail_import(uuid,text,jsonb,jsonb) TO service_role;
 
-CREATE OR REPLACE FUNCTION public.complete_gmail_review(
+CREATE FUNCTION public.complete_gmail_review(
   p_user_id uuid, p_message_id text, p_review jsonb
 ) RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_email public.processed_emails; v_review_id uuid;
@@ -256,7 +254,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.complete_gmail_review(uuid,text,jsonb) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.complete_gmail_review(uuid,text,jsonb) TO service_role;
 
-CREATE OR REPLACE FUNCTION public.approve_review_queue_item(
+CREATE FUNCTION public.approve_review_queue_item(
   p_user_id uuid, p_review_id uuid, p_amount numeric DEFAULT NULL, p_direction text DEFAULT NULL,
   p_merchant_name text DEFAULT NULL, p_bank_name text DEFAULT NULL, p_payment_provider text DEFAULT NULL,
   p_description text DEFAULT NULL
@@ -272,8 +270,11 @@ BEGIN
     RETURN jsonb_build_object('success',false,'error','Review item has already been processed','status',409,
       'review_status',v_review.review_status,'transaction_id',v_review.created_transaction_id);
   END IF;
-  IF v_review.external_reference IS NOT NULL THEN
-    SELECT * INTO v_existing FROM public.transactions WHERE user_id=p_user_id AND external_reference=v_review.external_reference LIMIT 1;
+  IF v_review.external_reference IS NOT NULL AND COALESCE(p_payment_provider, v_review.payment_provider) IS NOT NULL THEN
+    SELECT * INTO v_existing FROM public.transactions
+      WHERE user_id=p_user_id
+        AND payment_provider=COALESCE(p_payment_provider, v_review.payment_provider)
+        AND external_reference=v_review.external_reference LIMIT 1;
   END IF;
   IF v_existing.id IS NOT NULL THEN
     v_txn := v_existing;
@@ -284,12 +285,22 @@ BEGIN
         COALESCE(p_amount,v_review.amount),COALESCE(v_review.currency_code,'INR'),'completed',
         COALESCE(p_description,v_review.description),COALESCE(p_merchant_name,v_review.merchant_name),
         COALESCE(p_bank_name,v_review.bank_name),COALESCE(p_payment_provider,v_review.payment_provider),
-        v_review.account_last4,v_review.external_reference,v_review.occurred_at)
+      v_review.account_last4,v_review.external_reference,v_review.occurred_at)
+    ON CONFLICT (user_id,payment_provider,external_reference)
+      WHERE payment_provider IS NOT NULL AND external_reference IS NOT NULL AND external_reference <> ''
+      DO NOTHING
     RETURNING * INTO v_txn;
+    IF NOT FOUND THEN
+      SELECT * INTO v_txn FROM public.transactions WHERE user_id=p_user_id
+        AND payment_provider=COALESCE(p_payment_provider, v_review.payment_provider)
+        AND external_reference=v_review.external_reference LIMIT 1;
+      IF v_txn.id IS NULL THEN RAISE EXCEPTION 'transaction deduplication conflict could not be resolved'; END IF;
+    ELSE
     INSERT INTO public.ledger_events(transaction_id,user_id,event_type,event_source,description,metadata,external_event_id,occurred_at)
       VALUES(v_txn.id,p_user_id,'created','manual','Transaction approved from Gmail review',
         jsonb_build_object('review_id',p_review_id,'email_message_id',v_review.email_message_id),
         v_review.email_message_id,now());
+    END IF;
   END IF;
   UPDATE public.import_review_queue SET review_status='approved',created_transaction_id=v_txn.id,
     resolved_at=now(),updated_at=now() WHERE id=p_review_id;
@@ -304,7 +315,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.approve_review_queue_item(uuid,uuid,numeric,text,text,text,text,text) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.approve_review_queue_item(uuid,uuid,numeric,text,text,text,text,text) TO authenticated, service_role;
 
-CREATE OR REPLACE FUNCTION public.reject_review_queue_item(p_user_id uuid,p_review_id uuid)
+CREATE FUNCTION public.reject_review_queue_item(p_user_id uuid,p_review_id uuid)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_review public.import_review_queue;
 BEGIN
@@ -322,7 +333,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.reject_review_queue_item(uuid,uuid) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.reject_review_queue_item(uuid,uuid) TO authenticated, service_role;
 
-CREATE OR REPLACE FUNCTION public.create_manual_transaction_with_event(p_user_id uuid,p_transaction jsonb)
+CREATE FUNCTION public.create_manual_transaction_with_event(p_user_id uuid,p_transaction jsonb)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_txn public.transactions;
 BEGIN
@@ -345,7 +356,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.create_manual_transaction_with_event(uuid,jsonb) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.create_manual_transaction_with_event(uuid,jsonb) TO authenticated, service_role;
 
-CREATE OR REPLACE FUNCTION public.update_manual_transaction_with_event(p_user_id uuid,p_transaction_id uuid,p_updates jsonb)
+CREATE FUNCTION public.update_manual_transaction_with_event(p_user_id uuid,p_transaction_id uuid,p_updates jsonb)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_txn public.transactions;
 BEGIN
@@ -383,23 +394,23 @@ GRANT EXECUTE ON FUNCTION public.update_manual_transaction_with_event(uuid,uuid,
 
 -- Durable, idempotent Pub/Sub webhook processing. Existing duplicate provider
 -- event IDs must be resolved before creating the unique index.
-CREATE INDEX IF NOT EXISTS idx_ai_messages_conversation_user_batch_a ON public.ai_messages(conversation_id,user_id);
-CREATE INDEX IF NOT EXISTS idx_alerts_transaction_batch_a ON public.alerts(transaction_id);
-CREATE INDEX IF NOT EXISTS idx_goal_contributions_goal_user_batch_a ON public.goal_contributions(goal_id,user_id);
-CREATE INDEX IF NOT EXISTS idx_reminder_logs_share_batch_a ON public.reminder_logs(expense_share_id);
-CREATE INDEX IF NOT EXISTS idx_repayment_events_repayment_batch_a ON public.repayment_events(repayment_id);
-CREATE INDEX IF NOT EXISTS idx_repayment_events_user_batch_a ON public.repayment_events(user_id);
-CREATE INDEX IF NOT EXISTS idx_repayments_reversed_by_batch_a ON public.repayments(reversed_by);
-CREATE INDEX IF NOT EXISTS idx_transactions_related_batch_a ON public.transactions(related_transaction_id);
-CREATE INDEX IF NOT EXISTS idx_transactions_user_batch_a ON public.transactions(user_id);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_webhook_events_provider_id
+CREATE INDEX idx_ai_messages_conversation_user_batch_a ON public.ai_messages(conversation_id,user_id);
+CREATE INDEX idx_alerts_transaction_batch_a ON public.alerts(transaction_id);
+CREATE INDEX idx_goal_contributions_goal_user_batch_a ON public.goal_contributions(goal_id,user_id);
+CREATE INDEX idx_reminder_logs_share_batch_a ON public.reminder_logs(expense_share_id);
+CREATE INDEX idx_repayment_events_repayment_batch_a ON public.repayment_events(repayment_id);
+CREATE INDEX idx_repayment_events_user_batch_a ON public.repayment_events(user_id);
+CREATE INDEX idx_repayments_reversed_by_batch_a ON public.repayments(reversed_by);
+CREATE INDEX idx_transactions_related_batch_a ON public.transactions(related_transaction_id);
+CREATE INDEX idx_transactions_user_batch_a ON public.transactions(user_id);
+CREATE UNIQUE INDEX uq_webhook_events_provider_id
   ON public.webhook_events(provider,provider_event_id);
 ALTER TABLE public.webhook_events ADD COLUMN IF NOT EXISTS processing_started_at timestamptz;
 ALTER TABLE public.server_oauth_tokens ADD COLUMN IF NOT EXISTS sync_lease_until timestamptz;
-REVOKE ALL ON public.webhook_events FROM anon, authenticated;
+REVOKE ALL ON public.webhook_events FROM PUBLIC, anon, authenticated;
 GRANT ALL ON public.webhook_events TO service_role;
 
-CREATE OR REPLACE FUNCTION public.claim_gmail_webhook_event(
+CREATE FUNCTION public.claim_gmail_webhook_event(
   p_provider text,p_event_id text,p_event_type text,p_payload jsonb
 ) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_claimed boolean;
@@ -417,7 +428,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.claim_gmail_webhook_event(text,text,text,jsonb) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.claim_gmail_webhook_event(text,text,text,jsonb) TO service_role;
 
-CREATE OR REPLACE FUNCTION public.finish_gmail_webhook_event(
+CREATE FUNCTION public.finish_gmail_webhook_event(
   p_provider text,p_event_id text,p_status text,p_error text DEFAULT NULL
 ) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
@@ -430,7 +441,7 @@ END; $$;
 REVOKE ALL ON FUNCTION public.finish_gmail_webhook_event(text,text,text,text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.finish_gmail_webhook_event(text,text,text,text) TO service_role;
 
-CREATE OR REPLACE FUNCTION public.claim_gmail_sync(p_user_id uuid,p_lease_seconds integer DEFAULT 300)
+CREATE FUNCTION public.claim_gmail_sync(p_user_id uuid,p_lease_seconds integer DEFAULT 300)
 RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE v_claimed boolean;
 BEGIN
