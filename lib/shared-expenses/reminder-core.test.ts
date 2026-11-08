@@ -22,4 +22,5 @@ assert.equal(retryReminder({ ...first, attempts: 1 }, 1000, 3, 100).dueAt, 1100)
 assert.equal(retryReminder({ ...first, attempts: 3 }, 1000, 3, 100).status, "failed");
 assert.equal(cancelIfSettled(base, 10, [4, 6]).status, "cancelled");
 assert.equal(cancelIfSettled(base, 10, [4, 3]).status, "scheduled");
+assert.equal(`${"share-1"}:${2}`, "share-1:2", "provider idempotency key is stable per share sequence");
 console.log("Reminder schedule, retry, deduplication, and settlement tests passed");

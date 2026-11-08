@@ -1,5 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@/lib/supabase/server";
+import { calculateShareBalance } from "@/lib/shared-expenses/calculations";
+import { calculateSavingsProgress } from "@/lib/savings/calculations";
 
 const apiKey = process.env.GEMINI_API_KEY;
 if (!apiKey) throw new Error("GEMINI_API_KEY is missing from environment variables.");
@@ -17,13 +19,13 @@ async function getFinancialContext(userId: string) {
   ]);
   for (const result of [tx, groups, goals]) if (result.error) throw result.error;
   const transactions = rows(tx.data);
-  const completed = transactions.filter((t: any) => t.status === "completed");
+  const completed = transactions.filter((t) => t.status === "completed");
   const spending: Record<string, number> = {};
   completed.filter((t) => t.direction === "debit").forEach((t) => { const key = String(t.merchant_name || "Uncategorized"); spending[key] = (spending[key] || 0) + Number(t.amount); });
   const refunds = completed.filter((t) => t.transaction_type === "refund" || t.transaction_type === "reversal" || t.direction === "credit");
-  const sharedExpenses = rows(groups.data).map((g) => ({ ...g, shares: rows(g.shares).map((s) => { const repayments = rows(s.repayments).filter((r) => r.payment_status === "confirmed"); const repaid = repayments.reduce((n, r) => n + Number(r.amount || 0), 0); return { ...s, repayments, totalRepaid: repaid, outstandingBalance: Math.max(0, Number(s.amount_owed) - repaid), isSettled: Number(s.amount_owed) - repaid <= 0.01 }; }) }));
-  const savingsGoals = rows(goals.data).map((g) => { const confirmed = rows(g.contributions).filter((c) => c.contribution_status === "confirmed"); const currentAmount = confirmed.reduce((n, c) => n + Number(c.amount || 0), 0); return { ...g, contributions: confirmed, currentAmount, progressPercent: Math.min(100, Number((currentAmount / Number(g.target_amount) * 100).toFixed(2))) }; });
-  return { transactions, recentTransactions: transactions.slice(0, 30), spendingByMerchant: spending, refunds, sharedExpenses, savingsGoals, summary: { totalDebits: completed.filter((t: any) => t.direction === "debit").reduce((n: number, t: any) => n + Number(t.amount), 0), totalCredits: completed.filter((t: any) => t.direction === "credit").reduce((n: number, t: any) => n + Number(t.amount), 0) } };
+  const sharedExpenses = rows(groups.data).map((g) => ({ ...g, shares: rows(g.shares).map((s) => ({ ...s, ...calculateShareBalance(Number(s.amount_owed || 0), rows(s.repayments).map((r) => ({ amount: r.amount as number | string | null, payment_status: String(r.payment_status) }))) })) }));
+  const savingsGoals = rows(goals.data).map((g) => ({ ...g, ...calculateSavingsProgress(Number(g.target_amount), rows(g.contributions).map((c) => ({ amount: c.amount as number | string | null, contribution_status: String(c.contribution_status) }))) }));
+  return { transactions, recentTransactions: transactions.slice(0, 30), spendingByMerchant: spending, refunds, sharedExpenses, savingsGoals, summary: { totalDebits: completed.filter((t) => t.direction === "debit").reduce((n, t) => n + Number(t.amount), 0), totalCredits: completed.filter((t) => t.direction === "credit").reduce((n, t) => n + Number(t.amount), 0) } };
 }
 
 export async function queryFinancialAssistant(userId: string, question: string, conversationId?: string) {

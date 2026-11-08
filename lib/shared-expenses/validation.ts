@@ -43,6 +43,7 @@ export const recordRepaymentSchema = z.object({
   payment_method: z.string().max(50).default("upi"),
   payment_provider: z.string().max(100).optional().nullable(),
   external_reference: z.string().max(100).optional().nullable(),
+  idempotency_key: z.string().uuid().optional(),
 });
 
 export const reminderSettingSchema = z.object({

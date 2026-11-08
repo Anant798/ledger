@@ -1,4 +1,7 @@
 -- Additive reminder queue. Do not run automatically; review and apply separately.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_repayments_idempotency_reference
+  ON public.repayments(user_id, expense_share_id, external_reference)
+  WHERE external_reference ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$';
 CREATE TABLE IF NOT EXISTS public.expense_reminders (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -40,7 +43,7 @@ DECLARE v_count integer;
 BEGIN
   IF auth.uid() IS NOT NULL AND auth.uid() <> p_user_id THEN RAISE EXCEPTION 'not authorized'; END IF;
   INSERT INTO public.expense_reminders(user_id, expense_share_id, next_attempt_at, max_attempts)
-  SELECT p_user_id, sh.id, now() + make_interval(hours => COALESCE(rs.frequency_hours,168)), COALESCE(rs.max_attempts,5)
+  SELECT p_user_id, sh.id, now(), COALESCE(rs.max_attempts,5)
   FROM public.expense_shares sh JOIN public.expense_groups eg ON eg.id=sh.expense_group_id AND eg.user_id=p_user_id
   JOIN public.reminder_settings rs ON rs.user_id=p_user_id AND rs.enabled=true
   WHERE sh.user_id=p_user_id AND sh.email IS NOT NULL
@@ -83,6 +86,27 @@ BEGIN
 END; $$;
 DROP TRIGGER IF EXISTS trg_cancel_settled_expense_reminders ON public.repayments;
 CREATE TRIGGER trg_cancel_settled_expense_reminders AFTER INSERT OR UPDATE OF payment_status, amount ON public.repayments FOR EACH ROW EXECUTE FUNCTION public.cancel_settled_expense_reminders();
+CREATE OR REPLACE FUNCTION public.reconcile_expense_reminders_after_repayment_change()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_share uuid; v_user uuid; v_owed numeric; v_paid numeric; v_settings public.reminder_settings;
+BEGIN
+  v_share := COALESCE(NEW.expense_share_id, OLD.expense_share_id);
+  SELECT user_id, amount_owed INTO v_user, v_owed FROM public.expense_shares WHERE id=v_share;
+  SELECT COALESCE(SUM(amount),0) INTO v_paid FROM public.repayments WHERE expense_share_id=v_share AND payment_status='confirmed';
+  IF v_paid >= v_owed - 0.01 THEN
+    UPDATE public.expense_reminders SET status='cancelled', next_attempt_at=NULL, lease_until=NULL, updated_at=now() WHERE expense_share_id=v_share AND status IN ('scheduled','sending');
+  ELSE
+    SELECT * INTO v_settings FROM public.reminder_settings WHERE user_id=v_user AND enabled=true;
+    IF v_settings.user_id IS NOT NULL THEN
+      UPDATE public.expense_reminders SET status='scheduled', next_attempt_at=now(), lease_until=NULL, updated_at=now()
+      WHERE expense_share_id=v_share AND status='cancelled' AND reminder_sequence <= v_settings.max_reminders
+        AND NOT EXISTS (SELECT 1 FROM public.expense_reminders active WHERE active.expense_share_id=v_share AND active.status IN ('scheduled','sending'));
+    END IF;
+  END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+END; $$;
+DROP TRIGGER IF EXISTS trg_reconcile_expense_reminders_after_repayment_change ON public.repayments;
+CREATE TRIGGER trg_reconcile_expense_reminders_after_repayment_change AFTER INSERT OR UPDATE OF payment_status,amount OR DELETE ON public.repayments FOR EACH ROW EXECUTE FUNCTION public.reconcile_expense_reminders_after_repayment_change();
 
 CREATE OR REPLACE FUNCTION public.schedule_followup_expense_reminder()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$

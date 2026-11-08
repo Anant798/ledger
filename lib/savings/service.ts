@@ -68,9 +68,10 @@ export class SavingsService {
     if (error) throw error;
 
     const contributions: Contribution[] = (goal.contributions || []).filter((c: Contribution) => c.contribution_status === "confirmed");
-    const confirmedAmount = contributions
-      .filter((c: any) => c.contribution_status === "confirmed")
-      .reduce((sum: number, c: Contribution) => sum + Number(c.amount || 0), 0);
+    const confirmedAmount = contributions.reduce(
+      (sum: number, c: Contribution) => sum + Number(c.amount || 0),
+      0
+    );
 
     const targetAmount = Number(goal.target_amount);
 

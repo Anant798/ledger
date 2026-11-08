@@ -7,7 +7,9 @@ export async function deliverReminder(payload: Record<string, unknown>): Promise
   const endpoint = process.env.REMINDER_DELIVERY_URL;
   const secret = process.env.REMINDER_DELIVERY_SECRET;
   if (!endpoint || !secret) throw new Error("Reminder delivery is not configured");
-  const response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${secret}` }, body: JSON.stringify(payload), signal: AbortSignal.timeout(15_000) });
+  const idempotencyKey = String(payload.idempotencyKey || payload.reminderId || "");
+  if (!idempotencyKey) throw new Error("Reminder idempotency key is required");
+  const response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${secret}`, "idempotency-key": idempotencyKey }, body: JSON.stringify(payload), signal: AbortSignal.timeout(15_000) });
   if (!response.ok) throw new Error(`Reminder delivery returned HTTP ${response.status}`);
 }
 
@@ -30,7 +32,7 @@ export async function runReminderWorker(limit = 25) {
     try {
       const group = Array.isArray(share.group) ? share.group[0] : share.group;
       if (!group) throw new Error("Expense group not found");
-      await deliverReminder({ reminderId: item.id, userId: item.user_id, to: share.email, participantName: share.participant_name, groupTitle: group.title, currencyCode: group.currency_code, outstandingBalance: balance });
+      await deliverReminder({ reminderId: item.id, idempotencyKey: `${item.expense_share_id}:${item.reminder_sequence}`, userId: item.user_id, to: share.email, participantName: share.participant_name, groupTitle: group.title, currencyCode: group.currency_code, outstandingBalance: balance });
       await db.from("expense_reminders").update({ status: "sent", sent_at: new Date().toISOString(), next_attempt_at: null, lease_until: null, last_error: null, updated_at: new Date().toISOString() }).eq("id", item.id);
       await db.from("expense_reminder_attempts").upsert({ reminder_id: item.id, user_id: item.user_id, attempt_number: item.attempts, outcome: "sent" }, { onConflict: "reminder_id,attempt_number" });
       results.push({ id: item.id, status: "sent" });
