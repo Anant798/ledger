@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { calculateExpenseGroupBalance, calculateShareBalance, calculateSplit } from "./calculations.ts";
-import { archiveExpenseGroupSchema, createExpenseGroupSchema } from "./validation.ts";
+import { archiveExpenseGroupSchema, createExpenseGroupSchema, repaymentActionSchema } from "./validation.ts";
 import { resolveOwnerId } from "./integration-helpers.ts";
 
 const participants = (amounts: number[]) => amounts.map((amount, index) => ({
@@ -49,6 +49,25 @@ test("balances exclude the payer and inactive participants and count confirmed r
     outstandingBalance: 25,
     isFullySettled: false,
   });
+});
+
+test("multiple partial repayments and reversals recalculate the share balance", () => {
+  const result = calculateShareBalance(100, [
+    { amount: 25, payment_status: "confirmed" },
+    { amount: 15, payment_status: "confirmed" },
+    { amount: 20, payment_status: "reversed" },
+    { amount: 10, payment_status: "pending" },
+  ]);
+  assert.equal(result.totalRepaid, 40);
+  assert.equal(result.outstandingBalance, 60);
+  assert.equal(result.settlementHistory.length, 2);
+});
+
+test("repayment edit and reversal actions require idempotency and a reason", () => {
+  assert.equal(repaymentActionSchema.safeParse({ action: "edit", amount: 12.5, payment_method: "cash", idempotency_key: "d4f7c50a-cd20-47b7-bc68-46ced200d249" }).success, true);
+  assert.equal(repaymentActionSchema.safeParse({ action: "reverse", reason: "Duplicate entry" }).success, true);
+  assert.equal(repaymentActionSchema.safeParse({ action: "reverse", reason: " " }).success, false);
+  assert.equal(repaymentActionSchema.safeParse({ action: "edit", amount: 12.5, payment_method: "cash" }).success, false);
 });
 
 test("embedded Supabase ownership relationships resolve as either an object or one-row array", () => {

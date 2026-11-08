@@ -8,10 +8,12 @@ const directory = dirname(fileURLToPath(import.meta.url));
 const batchA = await readFile(join(directory, "20261108000000_batch_a_backend_closure.sql"), "utf8");
 const batchB = await readFile(join(directory, "20261108000100_expense_reminders.sql"), "utf8");
 const expenseGroups = await readFile(join(directory, "20261108000200_expense_groups_module.sql"), "utf8");
-const allSql = `${batchA}\n${batchB}\n${expenseGroups}`;
+const repayments = await readFile(join(directory, "20261108000300_repayments_settlements.sql"), "utf8");
+const savings = await readFile(join(directory, "20261108000400_savings_goals_module.sql"), "utf8");
+const allSql = `${batchA}\n${batchB}\n${expenseGroups}\n${repayments}\n${savings}`;
 
 test("migration versions are unique and ordered", () => {
-  const versions = ["20261108000000", "20261108000100", "20261108000200"];
+  const versions = ["20261108000000", "20261108000100", "20261108000200", "20261108000300", "20261108000400"];
   assert.equal(new Set(versions).size, versions.length);
   assert.deepEqual([...versions].sort(), versions);
 });
@@ -26,7 +28,7 @@ test("backend-only credential and webhook tables revoke inherited PUBLIC access"
 });
 
 test("constraint replacement is limited to expected definitions", () => {
-  assert.equal((allSql.match(/DROP CONSTRAINT/g) ?? []).length, 3);
+  assert.equal((allSql.match(/DROP CONSTRAINT/g) ?? []).length, 4);
   assert.doesNotMatch(allSql, /FOR c IN SELECT conname[\s\S]{0,300}DROP CONSTRAINT/i);
   assert.match(batchA, /Expected exactly one known transactions\.transaction_type check/);
   assert.match(batchA, /Expected exactly one known alerts\.alert_type check/);
@@ -92,4 +94,33 @@ test("expense group lifecycle migration preserves payment history and scopes mut
   assert.match(expenseGroups, /g\.archived_at IS NULL/i);
   assert.match(expenseGroups, /s\.is_active=true/i);
   assert.match(expenseGroups, /REVOKE ALL ON FUNCTION public\.set_expense_group_archived\(uuid,uuid,boolean\) FROM PUBLIC,anon/i);
+});
+
+test("repayment settlement migration uses known states, atomic audit, and idempotent RPCs", () => {
+  assert.match(repayments, /payment_status='reversed'/);
+  assert.match(repayments, /reversed_by=p_user_id/);
+  assert.match(repayments, /event_type IN \('created','confirmed','reversed','updated'\)/);
+  assert.match(repayments, /idempotency_key uuid/);
+  assert.match(repayments, /uq_repayment_events_user_idempotency/);
+  assert.match(repayments, /p_idempotency_key IS NULL/);
+  assert.match(repayments, /uq_repayments_user_share_idempotency/);
+  assert.match(repayments, /FOR UPDATE/);
+  assert.match(repayments, /INSERT INTO public\.alerts/);
+  assert.match(repayments, /schedule_expense_reminders\(p_user_id\)/);
+  assert.match(repayments, /CREATE FUNCTION public\.update_shared_expense_repayment/);
+  assert.match(repayments, /CREATE FUNCTION public\.reverse_shared_expense_repayment/);
+  assert.doesNotMatch(repayments, /DELETE\s+FROM\s+public\.(repayments|repayment_events)/i);
+});
+
+test("savings module keeps audit history, schedules recurring rules, and scopes writes", () => {
+  assert.match(savings, /ADD COLUMN IF NOT EXISTS deleted_at timestamptz/i);
+  assert.match(savings, /CREATE TABLE IF NOT EXISTS public\.savings_contribution_events/i);
+  assert.match(savings, /CREATE TABLE IF NOT EXISTS public\.savings_goal_rules/i);
+  assert.match(savings, /FOR UPDATE OF rule SKIP LOCKED/i);
+  assert.match(savings, /IF auth\.uid\(\) IS DISTINCT FROM p_user_id THEN RAISE EXCEPTION 'not authorized'/i);
+  assert.match(savings, /manually_reversed_at IS NULL/i);
+  assert.match(savings, /REVOKE ALL ON FUNCTION public\.run_due_savings_goal_rules\(integer\) FROM PUBLIC,anon,authenticated/i);
+  assert.match(savings, /GRANT EXECUTE ON FUNCTION public\.run_due_savings_goal_rules\(integer\) TO service_role/i);
+  assert.match(savings, /Savings goal completed/i);
+  assert.doesNotMatch(savings, /DELETE\s+FROM\s+public\.(savings_goals|goal_contributions)/i);
 });

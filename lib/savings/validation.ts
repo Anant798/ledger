@@ -25,6 +25,19 @@ export const addContributionSchema = z.object({
   transaction_id: z.string().uuid().optional(),
 });
 
+export const updateContributionSchema = z.object({
+  amount: z.number().positive().finite().optional(),
+  notes: z.string().max(500).optional().nullable(),
+}).refine((value) => value.amount !== undefined || value.notes !== undefined, "Provide amount or notes");
+
+export const savingsRuleSchema = z.object({
+  amount: z.number().positive().finite(),
+  frequency: z.enum(["weekly", "monthly"]),
+  day_of_month: z.number().int().min(1).max(31).optional(),
+  enabled: z.boolean().default(true),
+});
+
 export type CreateSavingsGoalInput = z.infer<typeof createSavingsGoalSchema>;
 export type UpdateSavingsGoalInput = z.infer<typeof updateSavingsGoalSchema>;
 export type AddContributionInput = z.infer<typeof addContributionSchema>;
+export type UpdateContributionInput = z.infer<typeof updateContributionSchema>;

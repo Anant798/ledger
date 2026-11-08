@@ -3,6 +3,7 @@ import {
   CreateExpenseGroupInput,
   UpdateExpenseGroupInput,
   RecordRepaymentInput,
+  UpdateRepaymentInput,
   toDatabaseParticipantType,
   toDatabaseSplitMethod,
 } from "./validation";
@@ -24,7 +25,7 @@ export class SharedExpensesService {
         *,
         shares:expense_shares(
           *,
-          repayments(*)
+          repayments(*, events:repayment_events(*))
         )
       `)
       .eq("user_id", userId)
@@ -49,7 +50,7 @@ export class SharedExpensesService {
         *,
         shares:expense_shares(
           *,
-          repayments(*)
+          repayments(*, events:repayment_events(*))
         )
       `)
       .eq("id", groupId)
@@ -186,11 +187,37 @@ export class SharedExpensesService {
       p_currency_code: input.currency_code,
       p_payment_method: input.payment_method,
       p_payment_provider: input.payment_provider || null,
-      p_external_reference: input.idempotency_key || input.external_reference || null,
+      p_external_reference: input.external_reference || null,
+      p_idempotency_key: input.idempotency_key,
     });
     if (error) throw error;
     if (!data?.success) throw new Error(data?.error || "Unable to record repayment");
     return data.result;
+  }
+
+  static async updateRepayment(userId: string, repaymentId: string, input: UpdateRepaymentInput) {
+    const supabase = await createClient();
+    const { data, error } = await supabase.rpc("update_shared_expense_repayment", {
+      p_user_id: userId,
+      p_repayment_id: repaymentId,
+      p_amount: input.amount,
+      p_payment_method: input.payment_method,
+      p_payment_provider: input.payment_provider || null,
+      p_idempotency_key: input.idempotency_key,
+    });
+    if (error) throw error;
+    return data;
+  }
+
+  static async reverseRepayment(userId: string, repaymentId: string, reason: string) {
+    const supabase = await createClient();
+    const { data, error } = await supabase.rpc("reverse_shared_expense_repayment", {
+      p_user_id: userId,
+      p_repayment_id: repaymentId,
+      p_reason: reason,
+    });
+    if (error) throw error;
+    return data;
   }
 
   /**

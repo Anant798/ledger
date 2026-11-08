@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { calculateSplit } from "@/lib/shared-expenses/calculations";
 
 type Participant = {
@@ -11,7 +11,7 @@ type Participant = {
   email?: string | null;
   phone_number?: string | null;
   is_active?: boolean;
-  repayments?: Array<{ id: string; amount: number | string; payment_status: string; confirmed_at?: string | null; created_at?: string }>;
+  repayments?: Array<{ id: string; amount: number | string; payment_status: string; payment_method?: string; confirmed_at?: string | null; created_at?: string; reversal_reason?: string | null; events?: Array<{ id: string; event_type: string; event_source: string; metadata: Record<string, unknown>; created_at: string }> }>;
   settlementHistory?: Array<{ id: string; amount: number | string; payment_status: string; confirmed_at?: string | null; created_at?: string }>;
   totalRepaid?: number;
   outstandingBalance?: number;
@@ -62,6 +62,7 @@ export default function ExpenseGroups() {
   const [form, setForm] = useState<ExpenseForm>(blankForm);
   const [repayingShare, setRepayingShare] = useState<string | null>(null);
   const [repaymentAmount, setRepaymentAmount] = useState("");
+  const repaymentKeys = useRef<Record<string, string>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -196,6 +197,7 @@ export default function ExpenseGroups() {
     if (!amount || amount <= 0) return;
     setSaving(true);
     setError("");
+    const idempotencyKey = repaymentKeys.current[share.id] || (repaymentKeys.current[share.id] = crypto.randomUUID());
     try {
       const response = await fetch("/api/shared-expenses/repayments", {
         method: "POST",
@@ -205,11 +207,12 @@ export default function ExpenseGroups() {
           amount,
           currency_code: group.currency_code,
           payment_method: "other",
-          idempotency_key: crypto.randomUUID(),
+          idempotency_key: idempotencyKey,
         }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "Could not record repayment");
+      delete repaymentKeys.current[share.id];
       setRepayingShare(null);
       setRepaymentAmount("");
       await load();
@@ -218,6 +221,40 @@ export default function ExpenseGroups() {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function updateRepayment(id: string, input: { amount: number; payment_method: string; idempotency_key: string }) {
+    setSaving(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/shared-expenses/repayments/${id}`, {
+        method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "edit", ...input }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Could not update repayment");
+      await load();
+      return true;
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : "Could not update repayment");
+      return false;
+    } finally { setSaving(false); }
+  }
+
+  async function reverseRepayment(id: string, reason: string) {
+    setSaving(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/shared-expenses/repayments/${id}`, {
+        method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "reverse", reason }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Could not reverse repayment");
+      await load();
+      return true;
+    } catch (reverseError) {
+      setError(reverseError instanceof Error ? reverseError.message : "Could not reverse repayment");
+      return false;
+    } finally { setSaving(false); }
   }
 
   const activeBalance = groups.reduce((sum, group) => sum + group.outstandingBalance, 0);
@@ -253,7 +290,7 @@ export default function ExpenseGroups() {
           {!archived && <button onClick={openCreate} className="mt-5 bg-[#51452F] px-5 py-2.5 text-sm text-white hover:bg-[#6B593B]">Create your first expense</button>}
         </div>
         : <div className="grid gap-5 lg:grid-cols-2">
-          {groups.map((group) => <ExpenseCard key={group.id} group={group} archived={archived} onEdit={() => openEdit(group)} onArchive={() => void archiveGroup(group)} onRestore={() => void archiveGroup(group, true)} repayingShare={repayingShare} setRepayingShare={setRepayingShare} repaymentAmount={repaymentAmount} setRepaymentAmount={setRepaymentAmount} onRepayment={(share) => void recordRepayment(group, share)} saving={saving} />)}
+          {groups.map((group) => <ExpenseCard key={group.id} group={group} archived={archived} onEdit={() => openEdit(group)} onArchive={() => void archiveGroup(group)} onRestore={() => void archiveGroup(group, true)} repayingShare={repayingShare} setRepayingShare={setRepayingShare} repaymentAmount={repaymentAmount} setRepaymentAmount={setRepaymentAmount} onRepayment={(share) => void recordRepayment(group, share)} onUpdateRepayment={updateRepayment} onReverseRepayment={reverseRepayment} saving={saving} />)}
         </div>}
 
       {formOpen && <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-[#1D1A14]/60 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setFormOpen(false); }}>
@@ -321,11 +358,17 @@ function SummaryCard({ label, value }: { label: string; value: string }) {
   return <div className="border border-[#DDD3C0] bg-[#FAF7EF] px-5 py-4"><p className="text-xs uppercase tracking-wider text-[#817766]">{label}</p><p className="mt-2 font-serif text-2xl text-[#302B22]">{value}</p></div>;
 }
 
-function ExpenseCard({ group, archived, onEdit, onArchive, onRestore, repayingShare, setRepayingShare, repaymentAmount, setRepaymentAmount, onRepayment, saving }: {
+function ExpenseCard({ group, archived, onEdit, onArchive, onRestore, repayingShare, setRepayingShare, repaymentAmount, setRepaymentAmount, onRepayment, onUpdateRepayment, onReverseRepayment, saving }: {
   group: ExpenseGroup; archived: boolean; onEdit: () => void; onArchive: () => void; onRestore: () => void;
   repayingShare: string | null; setRepayingShare: (id: string | null) => void; repaymentAmount: string; setRepaymentAmount: (value: string) => void;
-  onRepayment: (share: Participant) => void; saving: boolean;
+  onRepayment: (share: Participant) => void;
+  onUpdateRepayment: (id: string, input: { amount: number; payment_method: string; idempotency_key: string }) => Promise<boolean>;
+  onReverseRepayment: (id: string, reason: string) => Promise<boolean>; saving: boolean;
 }) {
+  const [editingRepayment, setEditingRepayment] = useState<string | null>(null);
+  const [editedAmount, setEditedAmount] = useState("");
+  const [editedMethod, setEditedMethod] = useState("other");
+  const editKeys = useRef<Record<string, string>>({});
   const activeShares = group.shares.filter((share) => share.is_active !== false);
   const selfShare = activeShares.find((share) => share.participant_type === "owner");
   const debtShares = activeShares.filter((share) => share.participant_type !== "owner");
@@ -345,7 +388,8 @@ function ExpenseCard({ group, archived, onEdit, onArchive, onRestore, repayingSh
       {debtShares.map((share) => <div key={share.id} className="px-5 py-3">
         <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="font-medium text-[#51452F]">{share.participant_name}</p><p className="text-xs text-[#817766]">Share {money(share.amount_owed, group.currency_code)} · repaid {money(share.totalRepaid || 0, group.currency_code)}</p>{share.email && <p className="text-xs text-[#817766]">{share.email}</p>}</div><div className="flex items-center gap-3"><div className="text-right"><p className="text-xs text-[#817766]">Outstanding</p><p className={`font-semibold ${Number(share.outstandingBalance || 0) > 0.01 ? "text-[#805F22]" : "text-[#4E6942]"}`}>{money(share.outstandingBalance || 0, group.currency_code)}</p></div>{!archived && Number(share.outstandingBalance || 0) > 0.01 && <button onClick={() => { setRepayingShare(repayingShare === share.id ? null : share.id); setRepaymentAmount(String(share.outstandingBalance)); }} className="border border-[#C9BDA6] px-3 py-1.5 text-xs text-[#51452F]">Record repayment</button>}</div></div>
         {repayingShare === share.id && <div className="mt-3 flex flex-wrap items-end gap-2"><label className="text-xs text-[#756C5D]">Amount received<input autoFocus type="number" min="0.01" max={Number(share.outstandingBalance || 0)} step="0.01" value={repaymentAmount} onChange={(event) => setRepaymentAmount(event.target.value)} className="mt-1 block w-36 border border-[#CFC3AE] bg-white px-2.5 py-2 text-sm" /></label><button disabled={saving} onClick={() => onRepayment(share)} className="bg-[#51452F] px-3 py-2 text-xs text-white disabled:opacity-50">{saving ? "Saving…" : "Confirm received"}</button><button onClick={() => setRepayingShare(null)} className="px-2 py-2 text-xs text-[#756C5D]">Cancel</button></div>}
-        {share.settlementHistory?.length ? <details className="mt-2 text-xs text-[#756C5D]"><summary className="cursor-pointer">{share.settlementHistory.length} repayment record{share.settlementHistory.length === 1 ? "" : "s"}</summary><ul className="mt-2 space-y-1 pl-4">{share.settlementHistory.map((repayment) => <li key={repayment.id} className="list-disc">{money(repayment.amount, group.currency_code)} · {repayment.payment_status} · {repayment.confirmed_at ? new Date(repayment.confirmed_at).toLocaleDateString() : "date unavailable"}</li>)}</ul></details> : null}
+        {share.repayments?.length ? <details className="mt-2 text-xs text-[#756C5D]"><summary className="cursor-pointer">{share.repayments.length} repayment record{share.repayments.length === 1 ? "" : "s"}</summary><ul className="mt-2 space-y-2">{[...share.repayments].sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || ""))).map((repayment) => <li key={repayment.id} className="border-l-2 border-[#C9BDA6] pl-3"><p><strong>{share.participant_name}</strong> paid you {money(repayment.amount, group.currency_code)}{repayment.payment_method ? ` via ${repayment.payment_method.replaceAll("_", " ")}` : ""} · {repayment.payment_status} · {repayment.confirmed_at || repayment.created_at ? new Date(repayment.confirmed_at || repayment.created_at!).toLocaleDateString() : "date unavailable"}</p>{repayment.reversal_reason && <p className="mt-1 text-[#9A4E3D]">Reversal: {repayment.reversal_reason}</p>}{!archived && repayment.payment_status === "confirmed" && <div className="mt-1 flex gap-3"><button type="button" onClick={() => { setEditingRepayment(repayment.id); setEditedAmount(String(repayment.amount)); setEditedMethod(repayment.payment_method || "other"); }} className="text-[#715B37] underline">Edit</button><button type="button" onClick={() => { const reason = window.prompt("Why are you reversing this repayment?"); if (reason?.trim()) void onReverseRepayment(repayment.id, reason.trim()); }} className="text-[#9A4E3D] underline">Reverse</button></div>}{editingRepayment === repayment.id && <div className="mt-2 flex flex-wrap items-end gap-2"><label>Amount<input type="number" min="0.01" step="0.01" value={editedAmount} onChange={(event) => setEditedAmount(event.target.value)} className="mt-1 block w-28 border border-[#CFC3AE] px-2 py-1.5" /></label><label>Method<select value={editedMethod} onChange={(event) => setEditedMethod(event.target.value)} className="mt-1 block border border-[#CFC3AE] bg-white px-2 py-1.5">{["upi", "paypal", "cash", "bank_transfer", "other"].map((method) => <option key={method} value={method}>{method.replaceAll("_", " ")}</option>)}</select></label><button type="button" disabled={saving} onClick={async () => { const key = editKeys.current[repayment.id] || (editKeys.current[repayment.id] = crypto.randomUUID()); const ok = await onUpdateRepayment(repayment.id, { amount: Number(editedAmount), payment_method: editedMethod, idempotency_key: key }); if (ok) { delete editKeys.current[repayment.id]; setEditingRepayment(null); } }} className="bg-[#51452F] px-3 py-2 text-white disabled:opacity-50">Save</button><button type="button" onClick={() => setEditingRepayment(null)} className="px-2 py-2">Cancel</button></div>}</li>)}</ul></details> : null}
+        {share.repayments?.some((repayment) => repayment.events?.length) && <details className="mt-2 text-[11px] text-[#817766]"><summary className="cursor-pointer">Audit trail</summary><ul className="mt-1 space-y-1">{share.repayments.flatMap((repayment) => (repayment.events || []).map((event) => <li key={event.id}>{new Date(event.created_at).toLocaleString()} · {event.event_type === "updated" ? `Edited ${money(event.metadata.amount as number | string, group.currency_code)} (was ${money(event.metadata.previous_amount as number | string, group.currency_code)})` : event.event_type === "reversed" ? `Reversed${event.metadata.reason ? `: ${String(event.metadata.reason)}` : ""}` : `Repayment ${event.event_type}`} · {event.event_source}</li>))}</ul></details>}
       </div>)}
       {debtShares.length === 0 && !selfShare && <p className="px-5 py-4 text-sm text-[#817766]">No active participants.</p>}
     </div>

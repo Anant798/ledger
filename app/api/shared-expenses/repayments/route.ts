@@ -16,7 +16,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const body = await request.json();
+    let body: unknown;
+    try { body = await request.json(); }
+    catch { return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }); }
     const validation = recordRepaymentSchema.safeParse(body);
 
     if (!validation.success) {
@@ -37,9 +39,11 @@ export async function POST(request: Request) {
     });
   } catch (error: unknown) {
     console.error("Record repayment error:", error);
+    const message = error instanceof Error ? error.message : "Failed to record repayment";
+    const code = typeof error === "object" && error && "code" in error ? String(error.code) : "";
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to record repayment" },
-      { status: 500 }
+      { error: message },
+      { status: code === "23514" || code === "23505" ? 409 : code === "42501" ? 403 : 500 }
     );
   }
 }

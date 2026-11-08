@@ -3,6 +3,8 @@ import { redirect } from "next/navigation";
 import { connection } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import ExpenseGroups from "@/components/expense-groups";
+import NotificationCenter from "@/components/notification-center";
+import SavingsGoals from "@/components/savings-goals";
 
 export default async function DashboardPage() {
   // Wait for an incoming request before rendering.
@@ -27,11 +29,14 @@ export default async function DashboardPage() {
         </p>
 
         <h1 className="mt-3 font-serif text-4xl">Ledger</h1>
-        <form action="/auth/signout" method="post" className="mt-4">
+        <div className="mt-4 flex items-center gap-4">
+          <NotificationCenter />
+          <form action="/auth/signout" method="post">
           <button type="submit" className="text-sm text-[#715B37] underline underline-offset-4">
             Sign out
           </button>
-        </form>
+          </form>
+        </div>
       </header>
 
       <section className="mt-12">
@@ -49,6 +54,7 @@ export default async function DashboardPage() {
       </section>
 
       <ExpenseGroups />
+      <SavingsGoals />
     </main>
   );
 }

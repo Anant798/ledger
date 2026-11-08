@@ -60,12 +60,27 @@ export const archiveExpenseGroupSchema = z.object({ archived: z.boolean() }).str
 export const recordRepaymentSchema = z.object({
   expense_share_id: z.string().uuid(),
   amount: z.number().positive().finite(),
+  idempotency_key: z.string().uuid(),
   currency_code: z.string().default("INR"),
   payment_method: z.enum(["upi", "paypal", "cash", "bank_transfer", "other"]).default("upi"),
   payment_provider: z.string().max(100).optional().nullable(),
   external_reference: z.string().max(100).optional().nullable(),
-  idempotency_key: z.string().uuid().optional(),
 });
+
+export const updateRepaymentSchema = z.object({
+  action: z.literal("edit"),
+  amount: z.number().positive().finite(),
+  payment_method: z.enum(["upi", "paypal", "cash", "bank_transfer", "other"]),
+  payment_provider: z.string().max(100).optional().nullable(),
+  idempotency_key: z.string().uuid(),
+});
+
+export const reverseRepaymentSchema = z.object({
+  action: z.literal("reverse"),
+  reason: z.string().trim().min(1).max(500),
+});
+
+export const repaymentActionSchema = z.discriminatedUnion("action", [updateRepaymentSchema, reverseRepaymentSchema]);
 
 export const reminderSettingSchema = z.object({
   enabled: z.boolean(),
@@ -82,6 +97,7 @@ export const reminderSettingSchema = z.object({
 export type CreateExpenseGroupInput = z.infer<typeof createExpenseGroupSchema>;
 export type UpdateExpenseGroupInput = z.infer<typeof updateExpenseGroupSchema>;
 export type RecordRepaymentInput = z.infer<typeof recordRepaymentSchema>;
+export type UpdateRepaymentInput = z.infer<typeof updateRepaymentSchema>;
 
 /** Persisted participant values are constrained by the existing database schema. */
 export function toDatabaseParticipantType(type: CreateExpenseGroupInput["participants"][number]["participant_type"]): "owner" | "contact" {

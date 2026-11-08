@@ -170,6 +170,7 @@ SELECT p.oid::regprocedure AS function_signature, p.prosecdef AS security_define
 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
 WHERE n.nspname='public' AND p.proname IN (
   'create_shared_expense_group','record_shared_expense_repayment',
+  'update_shared_expense_repayment','reverse_shared_expense_repayment',
   'schedule_expense_reminders','schedule_followup_expense_reminder',
   'update_shared_expense_group','set_expense_group_archived'
 )
@@ -189,3 +190,37 @@ WHERE NOT t.tgisinternal AND t.tgrelid IN (
 ORDER BY table_name,t.tgname;
 -- Preserve unrelated triggers. Verify reminder cancellation trigger order and
 -- that no local trigger conflicts with the new archive/share lifecycle RPCs.
+
+-- 13. Repayment audit/idempotency compatibility checks.
+SELECT c.relname AS table_name, a.attname AS column_name,
+       format_type(a.atttypid,a.atttypmod) AS data_type, a.attnotnull AS not_null,
+       pg_get_expr(d.adbin,d.adrelid) AS default_expression
+FROM pg_class c JOIN pg_namespace ns ON ns.oid=c.relnamespace
+JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
+LEFT JOIN pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum
+WHERE ns.nspname='public' AND c.relname IN ('repayments','repayment_events')
+  AND a.attname='idempotency_key'
+ORDER BY c.relname;
+-- Existing columns must be uuid and existing rows must be reconciled before
+-- creating the filtered unique indexes; do not rewrite legacy external refs.
+
+SELECT user_id,expense_share_id,idempotency_key,count(*) AS row_count,
+       array_agg(id ORDER BY created_at,id) AS repayment_ids
+FROM public.repayments WHERE idempotency_key IS NOT NULL
+GROUP BY user_id,expense_share_id,idempotency_key HAVING count(*)>1;
+SELECT user_id,idempotency_key,count(*) AS row_count,
+       array_agg(id ORDER BY id) AS event_ids
+FROM public.repayment_events WHERE idempotency_key IS NOT NULL
+GROUP BY user_id,idempotency_key HAVING count(*)>1;
+-- Rows returned need manual idempotency reconciliation; never delete or merge
+-- repayment or event history automatically.
+
+SELECT conrelid::regclass AS table_name,conname,pg_get_constraintdef(oid) AS definition
+FROM pg_constraint
+WHERE conrelid IN ('public.repayments'::regclass,'public.repayment_events'::regclass,
+                   'public.alerts'::regclass)
+  AND contype='c'
+ORDER BY table_name,conname;
+-- The migration expects the live known event-type values created/confirmed/
+-- reversed, repayment states pending/confirmed/reversed, and alert type general.
+-- Any additional custom check definition must be reviewed before deployment.

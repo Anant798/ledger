@@ -6,6 +6,7 @@ import {
   UpdateSavingsGoalInput,
   AddContributionInput,
 } from "./validation";
+import { calculateSavingsProgress, nextSavingsRun } from "./calculations";
 
 export class SavingsService {
   /**
@@ -21,28 +22,20 @@ export class SavingsService {
         contributions:goal_contributions(*)
       `)
       .eq("user_id", userId)
+      .is("deleted_at", null)
       .order("created_at", { ascending: false });
 
     if (error) throw error;
 
     const enriched = (goals || []).map((goal) => {
-      const contributions: Contribution[] = (goal.contributions || []).filter((c: Contribution) => c.contribution_status === "confirmed");
-      // Only confirmed contributions count
-      const confirmedAmount = contributions
-        .reduce((sum: number, c: Contribution) => sum + Number(c.amount || 0), 0);
-
-      const targetAmount = Number(goal.target_amount);
-      const progressPercent =
-        targetAmount > 0
-          ? Math.min(Number(((confirmedAmount / targetAmount) * 100).toFixed(2)), 100)
-          : 0;
+      const allContributions: Contribution[] = goal.contributions || [];
+      const progress = calculateSavingsProgress(Number(goal.target_amount), allContributions);
 
       return {
         ...goal,
-        current_amount: confirmedAmount,
-        progressPercent,
-        isGoalMet: confirmedAmount >= targetAmount,
-        totalContributionsCount: contributions.length,
+        ...progress,
+        current_amount: progress.currentAmount,
+        totalContributionsCount: progress.confirmedContributionCount,
       };
     });
 
@@ -63,26 +56,17 @@ export class SavingsService {
       `)
       .eq("id", goalId)
       .eq("user_id", userId)
+      .is("deleted_at", null)
       .single();
 
     if (error) throw error;
 
-    const contributions: Contribution[] = (goal.contributions || []).filter((c: Contribution) => c.contribution_status === "confirmed");
-    const confirmedAmount = contributions.reduce(
-      (sum: number, c: Contribution) => sum + Number(c.amount || 0),
-      0
-    );
-
-    const targetAmount = Number(goal.target_amount);
+    const progress = calculateSavingsProgress(Number(goal.target_amount), goal.contributions || []);
 
     return {
       ...goal,
-      current_amount: confirmedAmount,
-      progressPercent:
-        targetAmount > 0
-          ? Math.min(Number(((confirmedAmount / targetAmount) * 100).toFixed(2)), 100)
-          : 0,
-      isGoalMet: confirmedAmount >= targetAmount,
+      ...progress,
+      current_amount: progress.currentAmount,
     };
   }
 
@@ -119,11 +103,69 @@ export class SavingsService {
       })
       .eq("id", goalId)
       .eq("user_id", userId)
+      .is("deleted_at", null)
       .select()
       .single();
 
     if (error) throw error;
     return data;
+  }
+
+  static async delete(userId: string, goalId: string) {
+    const supabase = await createClient();
+    const { data, error } = await supabase.rpc("archive_savings_goal", { p_user_id: userId, p_goal_id: goalId });
+    if (error) throw error;
+    return data;
+  }
+
+  static async complete(userId: string, goalId: string) {
+    const supabase = await createClient();
+    const { data, error } = await supabase.rpc("complete_savings_goal", { p_user_id: userId, p_goal_id: goalId });
+    if (error) throw error;
+    return data;
+  }
+
+  static async updateContribution(userId: string, contributionId: string, input: { amount?: number; notes?: string | null }) {
+    const supabase = await createClient();
+    const { data, error } = await supabase.rpc("update_savings_contribution", {
+      p_user_id: userId, p_contribution_id: contributionId,
+      p_amount: input.amount ?? null, p_notes: input.notes ?? null,
+      p_update_notes: Object.hasOwn(input, "notes"),
+    });
+    if (error) throw error;
+    return data;
+  }
+
+  static async reverseContribution(userId: string, contributionId: string, reason?: string) {
+    const supabase = await createClient();
+    const { data, error } = await supabase.rpc("reverse_savings_contribution", {
+      p_user_id: userId, p_contribution_id: contributionId, p_reason: reason || null,
+    });
+    if (error) throw error;
+    return data;
+  }
+
+  static async listRules(userId: string, goalId: string) {
+    const supabase = await createClient();
+    const { data, error } = await supabase.from("savings_goal_rules").select("*").eq("user_id", userId).eq("goal_id", goalId).order("created_at");
+    if (error) throw error;
+    return data || [];
+  }
+
+  static async saveRule(userId: string, goalId: string, input: { amount: number; frequency: "weekly" | "monthly"; day_of_month?: number; enabled: boolean }, ruleId?: string) {
+    const supabase = await createClient();
+    const nextRun = nextSavingsRun(new Date(), input.frequency, input.day_of_month).toISOString();
+    const { data, error } = ruleId
+      ? await supabase.from("savings_goal_rules").update({ ...input, next_run_at: nextRun, updated_at: new Date().toISOString() }).eq("id", ruleId).eq("user_id", userId).eq("goal_id", goalId).select().single()
+      : await supabase.from("savings_goal_rules").insert({ ...input, user_id: userId, goal_id: goalId, next_run_at: nextRun }).select().single();
+    if (error) throw error;
+    return data;
+  }
+
+  static async deleteRule(userId: string, goalId: string, ruleId: string) {
+    const supabase = await createClient();
+    const { error } = await supabase.from("savings_goal_rules").delete().eq("id", ruleId).eq("user_id", userId).eq("goal_id", goalId);
+    if (error) throw error;
   }
 
   /**
@@ -146,20 +188,10 @@ export class SavingsService {
       return data;
     }
 
-    const { data, error } = await supabase
-      .from("goal_contributions")
-      .insert({
-        goal_id: input.goal_id,
-        user_id: userId,
-        amount: input.amount,
-        contribution_source: "manual",
-        contribution_status: "confirmed",
-        notes: input.notes || null,
-        contributed_at: input.contributed_at || new Date().toISOString(),
-      })
-      .select()
-      .single();
-
+    const { data, error } = await supabase.rpc("record_manual_goal_contribution", {
+      p_user_id: userId, p_goal_id: input.goal_id, p_amount: input.amount,
+      p_notes: input.notes || null, p_contributed_at: input.contributed_at || new Date().toISOString(),
+    });
     if (error) throw error;
     return data;
   }
