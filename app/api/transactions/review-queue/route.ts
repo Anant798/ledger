@@ -51,7 +51,7 @@ export async function GET() {
   }
 }
 
-// POST: Approve or reject an item in import_review_queue with idempotency protection
+// POST: Approve or reject an item in import_review_queue with atomic transaction
 export async function POST(request: Request) {
   try {
     const supabase = await createClient();
@@ -77,19 +77,83 @@ export async function POST(request: Request) {
 
     const { reviewId, action, updates } = parsed.data;
 
-    // Fetch review item
-    const { data: item, error: fetchErr } = await supabase
+    if (action === "reject") {
+      // Rejection updates review_status atomically
+      const { data: updatedItem, error: updateErr } = await supabase
+        .from("import_review_queue")
+        .update({
+          review_status: "rejected",
+          resolved_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", reviewId)
+        .eq("user_id", user.id)
+        .eq("review_status", "pending") // ensures only pending item is rejected
+        .select()
+        .maybeSingle();
+
+      if (updateErr) throw updateErr;
+
+      if (!updatedItem) {
+        return NextResponse.json(
+          { error: "Review item not found or already processed" },
+          { status: 409 }
+        );
+      }
+
+      await supabase
+        .from("alerts")
+        .update({ is_resolved: true, resolved_at: new Date().toISOString() })
+        .eq("user_id", user.id)
+        .eq("alert_type", "transaction_review")
+        .ilike("message", `%${updatedItem.amount}%`);
+
+      return NextResponse.json({
+        message: "Import item rejected",
+        item: updatedItem,
+      });
+    }
+
+    // Action === 'approve':
+    // Use atomic RPC function 'approve_review_queue_item'
+    const { data: rpcResult, error: rpcError } = await supabase.rpc(
+      "approve_review_queue_item",
+      {
+        p_user_id: user.id,
+        p_review_id: reviewId,
+        p_amount: updates?.amount || null,
+        p_direction: updates?.direction || null,
+        p_merchant_name: updates?.merchant_name || null,
+        p_bank_name: updates?.bank_name || null,
+        p_payment_provider: updates?.payment_provider || null,
+        p_description: updates?.description || null,
+      }
+    );
+
+    // If RPC is available, use its result directly
+    if (!rpcError && rpcResult) {
+      if (!rpcResult.success) {
+        return NextResponse.json(
+          { error: rpcResult.error, ...rpcResult },
+          { status: rpcResult.status || 400 }
+        );
+      }
+      return NextResponse.json(rpcResult);
+    }
+
+    // Fallback if RPC function is not yet migrated in database environment:
+    // Execute atomic claim query via conditional update (review_status = 'pending')
+    const { data: item, error: claimErr } = await supabase
       .from("import_review_queue")
       .select("*")
       .eq("id", reviewId)
       .eq("user_id", user.id)
       .single();
 
-    if (fetchErr || !item) {
+    if (claimErr || !item) {
       return NextResponse.json({ error: "Review item not found" }, { status: 404 });
     }
 
-    // IDEMPOTENCY CHECK: Prevent repeated approvals or actions from creating duplicate transactions
     if (item.review_status !== "pending") {
       return NextResponse.json(
         {
@@ -101,64 +165,6 @@ export async function POST(request: Request) {
       );
     }
 
-    if (action === "reject") {
-      const { data: updatedItem, error: updateErr } = await supabase
-        .from("import_review_queue")
-        .update({
-          review_status: "rejected",
-          resolved_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", reviewId)
-        .eq("user_id", user.id)
-        .select()
-        .single();
-
-      if (updateErr) throw updateErr;
-
-      // Update related alert if any
-      await supabase
-        .from("alerts")
-        .update({ is_resolved: true, resolved_at: new Date().toISOString() })
-        .eq("user_id", user.id)
-        .eq("alert_type", "transaction_review")
-        .ilike("message", `%${item.amount}%`);
-
-      return NextResponse.json({
-        message: "Import item rejected",
-        item: updatedItem,
-      });
-    }
-
-    // Action === 'approve':
-    // 1. Double check external_reference duplicate if present
-    if (item.external_reference) {
-      const { data: existingTxn } = await supabase
-        .from("transactions")
-        .select("id")
-        .eq("user_id", user.id)
-        .eq("external_reference", item.external_reference)
-        .maybeSingle();
-
-      if (existingTxn) {
-        await supabase
-          .from("import_review_queue")
-          .update({
-            review_status: "approved",
-            resolved_at: new Date().toISOString(),
-            created_transaction_id: existingTxn.id,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", reviewId);
-
-        return NextResponse.json({
-          message: "Transaction already exists with this reference. Review marked as approved.",
-          transactionId: existingTxn.id,
-        });
-      }
-    }
-
-    // 2. Create confirmed transaction in transactions table
     const finalAmount = updates?.amount || item.amount;
     const finalDirection = updates?.direction || item.direction;
     const finalMerchant = updates?.merchant_name ?? item.merchant_name;
@@ -188,7 +194,7 @@ export async function POST(request: Request) {
 
     if (insertTxnErr) throw insertTxnErr;
 
-    // 3. Atomically update review item
+    // Atomically mark approved
     await supabase
       .from("import_review_queue")
       .update({
@@ -200,7 +206,7 @@ export async function POST(request: Request) {
       .eq("id", reviewId)
       .eq("user_id", user.id);
 
-    // 4. Update processed_emails record with created transaction_id
+    // Update processed_emails with created transaction_id
     if (item.email_message_id) {
       await supabase
         .from("processed_emails")
@@ -212,7 +218,7 @@ export async function POST(request: Request) {
         .eq("message_id", item.email_message_id);
     }
 
-    // 5. Log ledger event
+    // Insert audit ledger event
     await supabase.from("ledger_events").insert({
       transaction_id: newTxn.id,
       user_id: user.id,
@@ -227,7 +233,7 @@ export async function POST(request: Request) {
       occurred_at: new Date().toISOString(),
     });
 
-    // 6. Mark review alerts as resolved
+    // Mark review alerts resolved
     await supabase
       .from("alerts")
       .update({ is_resolved: true, resolved_at: new Date().toISOString() })

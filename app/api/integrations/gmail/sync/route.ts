@@ -16,12 +16,16 @@ export async function POST(request: Request) {
     }
 
     let forceFullSync = false;
+    let fetchAllPages = false;
     let maxResults = 25;
 
     try {
       const body = await request.json();
       if (typeof body?.forceFullSync === "boolean") {
         forceFullSync = body.forceFullSync;
+      }
+      if (typeof body?.fetchAllPages === "boolean") {
+        fetchAllPages = body.fetchAllPages;
       }
       if (typeof body?.maxResults === "number") {
         maxResults = Math.min(Math.max(body.maxResults, 1), 50);
@@ -32,6 +36,7 @@ export async function POST(request: Request) {
 
     const syncResult = await syncUserGmail(user.id, {
       forceFullSync,
+      fetchAllPages,
       maxResults,
     });
 

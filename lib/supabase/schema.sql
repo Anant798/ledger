@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS public.server_oauth_tokens (
     token_expiry TIMESTAMPTZ,
     scope TEXT,
     history_id TEXT,
+    next_page_token TEXT,
+    initial_sync_completed BOOLEAN NOT NULL DEFAULT false,
     watch_expiration TIMESTAMPTZ,
     last_synced_at TIMESTAMPTZ,
     sync_status TEXT DEFAULT 'idle' CHECK (sync_status IN ('idle', 'syncing', 'error')),
@@ -30,9 +32,6 @@ CREATE TABLE IF NOT EXISTS public.server_oauth_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_server_oauth_user_id ON public.server_oauth_tokens(user_id);
 
--- Enable RLS and DO NOT add permissive policies for authenticated/anon.
--- By default in Supabase, when RLS is enabled with no policies, ALL access is denied to clients,
--- while service_role (bypassing RLS) retains full backend access.
 ALTER TABLE public.server_oauth_tokens ENABLE ROW LEVEL SECURITY;
 
 -- 2. BACKEND-CONTROLLED PROCESSED EMAILS TABLE (Deduplication & Ingestion Audit)
@@ -57,19 +56,17 @@ CREATE INDEX IF NOT EXISTS idx_processed_emails_user_msg ON public.processed_ema
 
 ALTER TABLE public.processed_emails ENABLE ROW LEVEL SECURITY;
 
--- Read-only policy for authenticated user
 CREATE POLICY "Users can view their own processed email logs"
     ON public.processed_emails FOR SELECT
     TO authenticated
     USING (auth.uid() = user_id);
 
 -- 3. IMPORT REVIEW QUEUE (Preserves transactions table status values)
--- Keeps existing transactions.status unpolluted.
--- Pending/uncertain imports sit here until user approves or rejects them.
+-- Correct composite foreign key referencing (user_id, message_id) in processed_emails
 CREATE TABLE IF NOT EXISTS public.import_review_queue (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-    email_message_id TEXT REFERENCES public.processed_emails(message_id) ON DELETE SET NULL,
+    email_message_id TEXT,
     direction TEXT NOT NULL CHECK (direction IN ('debit', 'credit')),
     amount NUMERIC NOT NULL CHECK (amount > 0),
     currency_code TEXT NOT NULL DEFAULT 'INR',
@@ -89,7 +86,9 @@ CREATE TABLE IF NOT EXISTS public.import_review_queue (
     resolved_at TIMESTAMPTZ,
     created_transaction_id UUID REFERENCES public.transactions(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT fk_import_review_processed_email FOREIGN KEY (user_id, email_message_id) 
+        REFERENCES public.processed_emails(user_id, message_id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_import_review_user ON public.import_review_queue(user_id, review_status);
@@ -107,8 +106,177 @@ CREATE POLICY "Users can update review items"
     USING (auth.uid() = user_id)
     WITH CHECK (auth.uid() = user_id);
 
--- 4. SAFE ADDITIONS TO transactions TABLE (Optional / Non-breaking)
--- Adds bank_name if you want to store bank alongside payment_provider without overloading
+-- 4. ATOMIC REVIEW APPROVAL RPC (Supabase Stored Procedure)
+-- Atomically claims the pending review item with FOR UPDATE,
+-- inserts the confirmed transaction and ledger_events,
+-- updates processed_emails, resolves alerts, and marks the review item approved.
+-- Concurrent approvals are locked out and return 409 conflict safely.
+CREATE OR REPLACE FUNCTION public.approve_review_queue_item(
+    p_user_id UUID,
+    p_review_id UUID,
+    p_amount NUMERIC DEFAULT NULL,
+    p_direction TEXT DEFAULT NULL,
+    p_merchant_name TEXT DEFAULT NULL,
+    p_bank_name TEXT DEFAULT NULL,
+    p_payment_provider TEXT DEFAULT NULL,
+    p_description TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_review_item RECORD;
+    v_new_transaction RECORD;
+    v_final_amount NUMERIC;
+    v_final_direction TEXT;
+    v_final_merchant TEXT;
+    v_final_bank TEXT;
+    v_final_provider TEXT;
+    v_final_desc TEXT;
+    v_existing_txn_id UUID;
+BEGIN
+    -- 1. Atomically lock and retrieve the review item
+    SELECT * INTO v_review_item
+    FROM public.import_review_queue
+    WHERE id = p_review_id AND user_id = p_user_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('success', false, 'error', 'Review item not found', 'status', 404);
+    END IF;
+
+    -- 2. Idempotency Check
+    IF v_review_item.review_status != 'pending' THEN
+        RETURN jsonb_build_object(
+            'success', false, 
+            'error', 'Review item has already been ' || v_review_item.review_status,
+            'review_status', v_review_item.review_status,
+            'transaction_id', v_review_item.created_transaction_id,
+            'status', 409
+        );
+    END IF;
+
+    -- 3. Check for existing transaction if external_reference is present
+    IF v_review_item.external_reference IS NOT NULL THEN
+        SELECT id INTO v_existing_txn_id
+        FROM public.transactions
+        WHERE user_id = p_user_id 
+          AND external_reference = v_review_item.external_reference
+        LIMIT 1;
+
+        IF v_existing_txn_id IS NOT NULL THEN
+            UPDATE public.import_review_queue
+            SET review_status = 'approved',
+                created_transaction_id = v_existing_txn_id,
+                resolved_at = now(),
+                updated_at = now()
+            WHERE id = p_review_id;
+
+            RETURN jsonb_build_object(
+                'success', true,
+                'message', 'Transaction already exists with this reference. Marked as approved.',
+                'transaction_id', v_existing_txn_id
+            );
+        END IF;
+    END IF;
+
+    -- 4. Apply user corrections or fallback to original values
+    v_final_amount := COALESCE(p_amount, v_review_item.amount);
+    v_final_direction := COALESCE(p_direction, v_review_item.direction);
+    v_final_merchant := COALESCE(p_merchant_name, v_review_item.merchant_name);
+    v_final_bank := COALESCE(p_bank_name, v_review_item.bank_name);
+    v_final_provider := COALESCE(p_payment_provider, v_review_item.payment_provider);
+    v_final_desc := COALESCE(p_description, v_review_item.description);
+
+    -- 5. Insert new confirmed transaction
+    INSERT INTO public.transactions (
+        user_id,
+        transaction_type,
+        direction,
+        amount,
+        currency_code,
+        status,
+        description,
+        merchant_name,
+        bank_name,
+        payment_provider,
+        account_last4,
+        external_reference,
+        occurred_at
+    ) VALUES (
+        p_user_id,
+        COALESCE(v_review_item.transaction_type, 'payment'),
+        v_final_direction,
+        v_final_amount,
+        COALESCE(v_review_item.currency_code, 'INR'),
+        'completed',
+        v_final_desc,
+        v_final_merchant,
+        v_final_bank,
+        v_final_provider,
+        v_review_item.account_last4,
+        v_review_item.external_reference,
+        v_review_item.occurred_at
+    )
+    RETURNING * INTO v_new_transaction;
+
+    -- 6. Insert audit event into ledger_events
+    INSERT INTO public.ledger_events (
+        transaction_id,
+        user_id,
+        event_type,
+        event_source,
+        description,
+        metadata,
+        occurred_at
+    ) VALUES (
+        v_new_transaction.id,
+        p_user_id,
+        'review_queue_approved',
+        'manual',
+        'Transaction approved from review queue item ' || p_review_id,
+        jsonb_build_object(
+            'review_id', p_review_id,
+            'original_confidence', v_review_item.confidence,
+            'email_message_id', v_review_item.email_message_id
+        ),
+        now()
+    );
+
+    -- 7. Update import_review_queue item to approved
+    UPDATE public.import_review_queue
+    SET review_status = 'approved',
+        created_transaction_id = v_new_transaction.id,
+        resolved_at = now(),
+        updated_at = now()
+    WHERE id = p_review_id;
+
+    -- 8. Update processed_emails with new transaction_id
+    IF v_review_item.email_message_id IS NOT NULL THEN
+        UPDATE public.processed_emails
+        SET status = 'parsed',
+            transaction_id = v_new_transaction.id
+        WHERE user_id = p_user_id AND message_id = v_review_item.email_message_id;
+    END IF;
+
+    -- 9. Resolve any corresponding alerts
+    UPDATE public.alerts
+    SET is_resolved = true,
+        resolved_at = now()
+    WHERE user_id = p_user_id
+      AND alert_type = 'transaction_review'
+      AND message LIKE '%' || v_review_item.amount || '%';
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'message', 'Transaction approved and confirmed',
+        'transaction', to_jsonb(v_new_transaction)
+    );
+END;
+$$;
+
+-- 5. SAFE ADDITIONS TO transactions TABLE (Optional / Non-breaking)
 DO $$ 
 BEGIN 
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'transactions' AND column_name = 'bank_name') THEN

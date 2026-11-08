@@ -18,6 +18,9 @@ export interface SyncResult {
   ignoredCount: number;
   errorsCount: number;
   nextHistoryId?: string;
+  nextPageToken?: string | null;
+  initialSyncCompleted?: boolean;
+  cursorUpdated: boolean;
   details: Array<{
     messageId: string;
     status: "imported" | "needs_review" | "ignored" | "skipped_duplicate" | "error";
@@ -107,7 +110,9 @@ function extractBodyFromPayload(payload: any): string {
 }
 
 /**
- * Process a single Gmail message with parsing, multi-key deduplication, and atomic logging.
+ * Process a single Gmail message.
+ * Strict insert order to satisfy foreign key constraints:
+ * processed_emails is ALWAYS created before import_review_queue references it!
  */
 async function processSingleMessage(
   supabase: any,
@@ -115,7 +120,7 @@ async function processSingleMessage(
   userId: string,
   messageId: string
 ) {
-  // Check if already processed (deduplication check)
+  // Check if already processed
   const { data: alreadyProcessed } = await supabase
     .from("processed_emails")
     .select("id, status, transaction_id")
@@ -123,17 +128,13 @@ async function processSingleMessage(
     .eq("message_id", messageId)
     .maybeSingle();
 
-  if (alreadyProcessed) {
-    // If it was already successfully parsed, queued, or ignored, skip it
-    if (alreadyProcessed.status !== "failed") {
-      return {
-        messageId,
-        status: "skipped_duplicate" as const,
-        reason: `Already processed with status: ${alreadyProcessed.status}`,
-        transactionId: alreadyProcessed.transaction_id || undefined,
-      };
-    }
-    // If previously failed, we retry it below
+  if (alreadyProcessed && alreadyProcessed.status !== "failed") {
+    return {
+      messageId,
+      status: "skipped_duplicate" as const,
+      reason: `Already processed with status: ${alreadyProcessed.status}`,
+      transactionId: alreadyProcessed.transaction_id || undefined,
+    };
   }
 
   const messageRes = await gmail.users.messages.get({
@@ -197,7 +198,6 @@ async function processSingleMessage(
     };
   }
 
-  // 3. Separate bank_name and payment_provider distinctly
   const bankName = parsed.bankName || "Unknown Bank";
   const paymentProvider = parsed.recipientOrSenderUpi
     ? "UPI"
@@ -209,7 +209,6 @@ async function processSingleMessage(
     ? "RTGS"
     : "Bank Transfer";
 
-  // 4. Uncertainty Check
   const isUncertain =
     parsed.confidence < 0.75 ||
     parsed.status === "unknown" ||
@@ -217,14 +216,13 @@ async function processSingleMessage(
     !parsed.bankName;
 
   const normalizedDate = normalizeTransactionDate(parsed.transactionDate);
-  // Ensure date-only string is preserved or full ISO datetime without shifting
   const occurredAt = normalizedDate.value
     ? (normalizedDate.precision === "date"
-        ? `${normalizedDate.value}T12:00:00+05:30` // noon IST to prevent midnight UTC rollback
+        ? `${normalizedDate.value}T12:00:00+05:30`
         : normalizedDate.value)
     : internalDate;
 
-  // 5. Multi-key deduplication: Check for existing transaction by external_reference AND payment_provider/bank
+  // Duplicate check
   if (parsed.referenceNumber) {
     let duplicateQuery = supabase
       .from("transactions")
@@ -232,7 +230,6 @@ async function processSingleMessage(
       .eq("user_id", userId)
       .eq("external_reference", parsed.referenceNumber);
 
-    // Only treat as duplicate if same payment_provider or bank_name matches
     if (paymentProvider) {
       duplicateQuery = duplicateQuery.eq("payment_provider", paymentProvider);
     }
@@ -256,13 +253,26 @@ async function processSingleMessage(
         messageId,
         status: "skipped_duplicate" as const,
         transactionId: existingTxn.id,
-        reason: `Transaction with external_reference ${parsed.referenceNumber} already exists for provider ${paymentProvider}.`,
+        reason: `Transaction with external_reference ${parsed.referenceNumber} already exists.`,
       };
     }
   }
 
-  // 6. Handle Uncertain -> import_review_queue
+  // 3. Handle Uncertain:
+  // Step 1: Insert processed_emails record first (so foreign key in import_review_queue is valid)
   if (isUncertain) {
+    await supabase.from("processed_emails").upsert({
+      user_id: userId,
+      message_id: messageId,
+      history_id: msg.historyId || null,
+      internal_date: internalDate,
+      sender: fromHeader,
+      subject: subjectHeader,
+      status: "uncertain_queued",
+      uncertain_reason: `Confidence (${parsed.confidence}) or missing banking metadata.`,
+    }, { onConflict: "user_id,message_id" });
+
+    // Step 2: Insert into import_review_queue with valid foreign key (user_id, email_message_id)
     const { data: reviewItem, error: reviewErr } = await supabase
       .from("import_review_queue")
       .insert({
@@ -295,17 +305,6 @@ async function processSingleMessage(
 
     if (reviewErr) throw reviewErr;
 
-    await supabase.from("processed_emails").upsert({
-      user_id: userId,
-      message_id: messageId,
-      history_id: msg.historyId || null,
-      internal_date: internalDate,
-      sender: fromHeader,
-      subject: subjectHeader,
-      status: "uncertain_queued",
-      uncertain_reason: `Queued in import_review_queue ${reviewItem.id}`,
-    }, { onConflict: "user_id,message_id" });
-
     await supabase.from("alerts").insert({
       user_id: userId,
       alert_type: "transaction_review",
@@ -323,7 +322,7 @@ async function processSingleMessage(
     };
   }
 
-  // 7. Confirmed Transaction Import
+  // 4. Confirmed Transaction:
   const { data: newTxn, error: insertTxnError } = await supabase
     .from("transactions")
     .insert({
@@ -351,7 +350,7 @@ async function processSingleMessage(
 
   if (insertTxnError) throw insertTxnError;
 
-  // Log to ledger_events
+  // Insert ledger event
   await supabase.from("ledger_events").insert({
     transaction_id: newTxn.id,
     user_id: userId,
@@ -369,7 +368,7 @@ async function processSingleMessage(
     occurred_at: occurredAt,
   });
 
-  // Log to processed_emails
+  // Insert/update processed_emails with new transaction_id
   await supabase.from("processed_emails").upsert({
     user_id: userId,
     message_id: messageId,
@@ -389,16 +388,16 @@ async function processSingleMessage(
 }
 
 /**
- * Main Gmail synchronization entry point.
- * Supports:
- * 1. Incremental sync using Gmail History API (when history_id exists).
- * 2. Fallback to full sync if history_id is expired (HTTP 404/INVALID_ARGUMENT).
- * 3. Paginated initial sync with maxResults and page tokens.
- * 4. Sync cursor (history_id & last_synced_at) updated ONLY after successful processing.
+ * Main Gmail synchronization entry point with complete pagination & cursor safety.
  */
 export async function syncUserGmail(
   userId: string,
-  options: { maxResults?: number; forceFullSync?: boolean; pageToken?: string } = {}
+  options: {
+    maxResults?: number;
+    forceFullSync?: boolean;
+    fetchAllPages?: boolean;
+    maxPages?: number;
+  } = {}
 ): Promise<SyncResult> {
   const supabase = createAdminClient();
   const { gmail, tokenRecord } = await getFreshGmailClient(userId);
@@ -417,39 +416,57 @@ export async function syncUserGmail(
     reviewQueuedCount: 0,
     ignoredCount: 0,
     errorsCount: 0,
+    cursorUpdated: false,
     details: [],
   };
 
   try {
     let messageIdsToProcess: string[] = [];
-    let newHistoryId: string | undefined;
+    let nextHistoryId: string | undefined;
+    let nextPageToken: string | null = null;
+    let isInitialSyncDone = tokenRecord.initial_sync_completed ?? false;
 
-    // 1. Try Incremental History Sync if history_id is available and forceFullSync is false
-    if (!options.forceFullSync && tokenRecord.history_id) {
+    const useHistory =
+      !options.forceFullSync &&
+      tokenRecord.history_id &&
+      tokenRecord.initial_sync_completed;
+
+    if (useHistory) {
+      // INCREMENTAL HISTORY SYNC (with full history pagination)
       try {
         result.syncType = "incremental_history";
-        const historyRes = await gmail.users.history.list({
-          userId: "me",
-          startHistoryId: tokenRecord.history_id,
-          historyTypes: ["messageAdded"],
-        });
-
-        newHistoryId = historyRes.data.historyId || undefined;
-        const histories = historyRes.data.history || [];
-
         const collectedIds = new Set<string>();
-        for (const h of histories) {
-          if (h.messagesAdded) {
-            for (const item of h.messagesAdded) {
-              if (item.message?.id) {
-                collectedIds.add(item.message.id);
+        let historyPageToken: string | undefined = undefined;
+
+        do {
+          const historyRes: any = await gmail.users.history.list({
+            userId: "me",
+            startHistoryId: tokenRecord.history_id,
+            historyTypes: ["messageAdded"],
+            pageToken: historyPageToken,
+            maxResults: options.maxResults || 50,
+          });
+
+          if (historyRes.data.historyId) {
+            nextHistoryId = historyRes.data.historyId;
+          }
+
+          const histories = historyRes.data.history || [];
+          for (const h of histories) {
+            if (h.messagesAdded) {
+              for (const item of h.messagesAdded) {
+                if (item.message?.id) {
+                  collectedIds.add(item.message.id);
+                }
               }
             }
           }
-        }
+
+          historyPageToken = historyRes.data.nextPageToken || undefined;
+        } while (historyPageToken && options.fetchAllPages);
+
         messageIdsToProcess = Array.from(collectedIds);
       } catch (historyErr: any) {
-        // If history ID is expired/out of date (404 or invalid startHistoryId), fall back to standard full query sync
         console.warn(
           `History API sync failed (${historyErr.message}). Falling back to query sync.`
         );
@@ -458,29 +475,51 @@ export async function syncUserGmail(
       }
     }
 
-    // 2. If incremental sync was not used or yielded fallback, do paginated search query
+    // INITIAL OR FULL QUERY SYNC (with safe resumable pagination)
     if (messageIdsToProcess.length === 0 && result.syncType !== "incremental_history") {
       let afterTimestamp: number | undefined;
 
-      if (!options.forceFullSync && tokenRecord.last_synced_at) {
-        // 2 days lookback buffer
+      if (!options.forceFullSync && tokenRecord.initial_sync_completed && tokenRecord.last_synced_at) {
         const lastSync = new Date(tokenRecord.last_synced_at).getTime();
         afterTimestamp = Math.floor((lastSync - 2 * 24 * 60 * 60 * 1000) / 1000);
       }
 
       const query = buildGmailTransactionQuery(afterTimestamp);
-      const listResponse = await gmail.users.messages.list({
-        userId: "me",
-        q: query,
-        maxResults: options.maxResults || 25,
-        pageToken: options.pageToken,
-      });
 
-      const messages = listResponse.data.messages || [];
-      messageIdsToProcess = messages.map((m: any) => m.id).filter(Boolean);
+      // Resume from previous tokenRecord.next_page_token if initial sync was partially completed
+      let currentPageToken: string | undefined =
+        tokenRecord.next_page_token || undefined;
+      const maxPages = options.fetchAllPages ? (options.maxPages || 10) : 1;
+      let pagesFetched = 0;
+      const collectedIds = new Set<string>();
+
+      do {
+        const listResponse = await gmail.users.messages.list({
+          userId: "me",
+          q: query,
+          maxResults: options.maxResults || 25,
+          pageToken: currentPageToken,
+        });
+
+        pagesFetched++;
+        const messages = listResponse.data.messages || [];
+        for (const m of messages) {
+          if (m.id) collectedIds.add(m.id);
+        }
+
+        currentPageToken = listResponse.data.nextPageToken || undefined;
+      } while (currentPageToken && pagesFetched < maxPages);
+
+      messageIdsToProcess = Array.from(collectedIds);
+      nextPageToken = currentPageToken || null;
+
+      // If no more pages left, initial sync is complete
+      if (!currentPageToken) {
+        isInitialSyncDone = true;
+      }
     }
 
-    // Also include previously failed messages for retry
+    // Add previously failed messages for retry
     const { data: failedMessages } = await supabase
       .from("processed_emails")
       .select("message_id")
@@ -498,7 +537,7 @@ export async function syncUserGmail(
 
     result.messagesFound = messageIdsToProcess.length;
 
-    // 3. Process each message individually
+    // Process each message
     for (const msgId of messageIdsToProcess) {
       result.processedCount++;
       try {
@@ -526,32 +565,56 @@ export async function syncUserGmail(
       }
     }
 
-    // 4. Update sync cursor only after processing completes
-    // Fetch latest profile historyId from Gmail if we don't have one
-    if (!newHistoryId) {
-      try {
-        const profileRes = await gmail.users.getProfile({ userId: "me" });
-        newHistoryId = profileRes.data.historyId || undefined;
-      } catch {
-        // Ignored if profile call is unavailable
+    // CURSOR SAFETY:
+    // Only advance cursor if NO critical message errors occurred in this batch.
+    // Also, during initial sync, only save final history cursor when all pages are completed.
+    if (result.errorsCount === 0) {
+      const updateData: Record<string, any> = {
+        sync_status: "idle",
+        last_synced_at: new Date().toISOString(),
+        next_page_token: nextPageToken,
+        initial_sync_completed: isInitialSyncDone,
+      };
+
+      // Only advance history_id when initial sync is fully complete or during incremental sync
+      if (isInitialSyncDone) {
+        if (!nextHistoryId) {
+          try {
+            const profileRes = await gmail.users.getProfile({ userId: "me" });
+            nextHistoryId = profileRes.data.historyId || undefined;
+          } catch {
+            // Profile call unavailable
+          }
+        }
+        if (nextHistoryId) {
+          updateData.history_id = nextHistoryId;
+        }
       }
+
+      await supabase
+        .from("server_oauth_tokens")
+        .update(updateData)
+        .eq("user_id", userId)
+        .eq("provider", "gmail");
+
+      result.cursorUpdated = true;
+    } else {
+      // PRESERVE previous cursor so failed messages and un-advanced window are retried
+      await supabase
+        .from("server_oauth_tokens")
+        .update({
+          sync_status: "idle",
+          last_error: `${result.errorsCount} messages failed to process. Cursor was preserved.`,
+        })
+        .eq("user_id", userId)
+        .eq("provider", "gmail");
+
+      result.cursorUpdated = false;
     }
 
-    const updateData: Record<string, any> = {
-      sync_status: "idle",
-      last_synced_at: new Date().toISOString(),
-    };
-    if (newHistoryId) {
-      updateData.history_id = newHistoryId;
-    }
-
-    await supabase
-      .from("server_oauth_tokens")
-      .update(updateData)
-      .eq("user_id", userId)
-      .eq("provider", "gmail");
-
-    result.nextHistoryId = newHistoryId;
+    result.nextHistoryId = nextHistoryId;
+    result.nextPageToken = nextPageToken;
+    result.initialSyncCompleted = isInitialSyncDone;
     return result;
   } catch (syncError: any) {
     console.error(`Gmail sync error for user ${userId}:`, syncError);
@@ -568,9 +631,6 @@ export async function syncUserGmail(
   }
 }
 
-/**
- * Sets up or renews Gmail Push Notifications (Pub/Sub watch).
- */
 export async function setupGmailWatch(userId: string, topicName: string) {
   const { gmail } = await getFreshGmailClient(userId);
   const supabase = createAdminClient();
