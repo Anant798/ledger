@@ -2,6 +2,8 @@ import { createClient } from "@/lib/supabase/server";
 import {
   CreateExpenseGroupInput,
   RecordRepaymentInput,
+  toDatabaseParticipantType,
+  toDatabaseSplitMethod,
 } from "./validation";
 import { calculateShareBalance, calculateSplit } from "./calculations";
 import { resolveOwnerId } from "./integration-helpers";
@@ -116,7 +118,7 @@ export class SharedExpensesService {
         title,
         total_amount,
         currency_code,
-        split_method,
+        split_method: toDatabaseSplitMethod(split_method),
       })
       .select()
       .single();
@@ -127,7 +129,7 @@ export class SharedExpensesService {
     const sharesToInsert = computedShares.map((p) => ({
       expense_group_id: group.id,
       user_id: userId,
-      participant_type: p.participant_type,
+      participant_type: toDatabaseParticipantType(p.participant_type),
       participant_name: p.participant_name,
       email: p.email || null,
       phone_number: p.phone_number || null,

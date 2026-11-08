@@ -6,14 +6,14 @@ export const createSavingsGoalSchema = z.object({
   target_amount: z.number().positive().finite(),
   currency_code: z.string().default("INR"),
   target_date: z.string().date().optional().nullable(),
-  status: z.enum(["in_progress", "completed", "paused", "cancelled"]).default("in_progress"),
+  status: z.enum(["active", "completed", "paused", "cancelled"]).default("active"),
 });
 
 export const updateSavingsGoalSchema = z.object({
   title: z.string().min(1).max(200).optional(),
   description: z.string().max(500).optional().nullable(),
   target_amount: z.number().positive().finite().optional(),
-  status: z.enum(["in_progress", "completed", "paused", "cancelled"]).optional(),
+  status: z.enum(["active", "completed", "paused", "cancelled"]).optional(),
   target_date: z.string().date().optional().nullable(),
 });
 

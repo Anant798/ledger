@@ -5,10 +5,15 @@ export function resolveOwnerId(relation: unknown): string | null {
   return typeof userId === "string" ? userId : null;
 }
 
+export function reminderIdempotencyKey(expenseShareId: string, sequence: number): string {
+  return `${expenseShareId}:${sequence}`;
+}
+
 export function nextReminderTime(now: Date, settings: { initial_message_enabled: boolean; frequency_hours: number; preferred_send_time: string; timezone: string }, sequence: number): Date | null {
   if (sequence === 1 && !settings.initial_message_enabled) return null;
   if (sequence > 1) return new Date(now.getTime() + settings.frequency_hours * 60 * 60 * 1000);
-  const [hours, minutes, seconds = "0"] = settings.preferred_send_time.split(":").map(Number);
+  const [hours = 0, minutes = 0, rawSeconds] = settings.preferred_send_time.split(":").map(Number);
+  const seconds = rawSeconds ?? 0;
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: settings.timezone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
   const part = (type: string) => Number(parts.find((item) => item.type === type)?.value);
   const year = part("year"), month = part("month"), day = part("day");

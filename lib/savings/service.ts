@@ -154,7 +154,7 @@ export class SavingsService {
 
   /**
    * Add automated contribution via backend service.
-   * Uses backend service-role admin client to safely write contribution_source = 'automated'
+   * Uses backend service-role admin client to safely write contribution_source = 'automatic'
    * without violating or weakening client RLS policies.
    */
   static async addAutomatedContribution(

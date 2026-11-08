@@ -30,13 +30,13 @@ export async function GET() {
       const { error: scheduleError } = await supabase.rpc("schedule_expense_reminders", { p_user_id: user.id });
       if (scheduleError) throw scheduleError;
     }
-    const { data: scheduled, error: queueError } = await supabase.from("expense_reminders").select("*,attempts:expense_reminder_attempts(*)").eq("user_id", user.id).order("created_at", { ascending: false }).limit(200);
+    const { data: scheduled, error: queueError } = await supabase.from("reminder_logs").select("*,attempts:reminder_attempts(*)").eq("user_id", user.id).order("created_at", { ascending: false }).limit(200);
     if (queueError) throw queueError;
 
     return NextResponse.json({
       settings: settings || null,
       pendingReminders,
-      scheduledReminders: scheduled || [],
+      scheduledReminders: (scheduled || []).map((reminder) => ({ ...reminder, status: reminder.delivery_status, attempts: reminder.attempt_count, next_attempt_at: reminder.scheduled_for })),
     });
   } catch (error) {
     console.error("Fetch pending reminders error:", error);
@@ -90,7 +90,7 @@ export async function POST(request: Request) {
 
     const { error: scheduleError } = validation.data.enabled
       ? await supabase.rpc("schedule_expense_reminders", { p_user_id: user.id })
-      : await supabase.from("expense_reminders").update({ status: "cancelled", next_attempt_at: null, lease_until: null, updated_at: new Date().toISOString() }).eq("user_id", user.id).in("status", ["scheduled", "sending"]);
+      : await supabase.rpc("cancel_user_expense_reminders", { p_user_id: user.id });
     if (scheduleError) throw scheduleError;
 
     return NextResponse.json({

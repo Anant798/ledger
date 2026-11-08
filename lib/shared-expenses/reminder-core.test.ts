@@ -1,18 +1,11 @@
 import assert from "node:assert/strict";
+import { cancelIfSettled, claimReminder, retryReminder, type ReminderState } from "./reminder-core.ts";
+import { nextReminderTime, reminderIdempotencyKey } from "./integration-helpers.ts";
+import { recordRepaymentSchema, toDatabaseParticipantType, toDatabaseSplitMethod } from "./validation.ts";
+import { calculateSavingsProgress } from "../savings/calculations.ts";
+import { createSavingsGoalSchema } from "../savings/validation.ts";
 
-type State = { status: "scheduled" | "sending" | "sent" | "cancelled" | "failed"; attempts: number; maxAttempts: number; dueAt: number; leaseUntil?: number };
-function claimReminder(state: State, now: number, leaseMs: number): State | null {
-  if (["sent", "cancelled", "failed"].includes(state.status) || (state.status === "sending" && (state.leaseUntil || 0) > now) || state.dueAt > now || state.attempts >= state.maxAttempts) return null;
-  return { ...state, status: "sending", attempts: state.attempts + 1, leaseUntil: now + leaseMs };
-}
-function retryReminder(state: State, now: number, maxAttempts: number, baseDelayMs: number): State {
-  return { ...state, status: state.attempts >= maxAttempts ? "failed" : "scheduled", dueAt: now + Math.min(baseDelayMs * 2 ** Math.max(0, state.attempts - 1), 86_400_000), maxAttempts, leaseUntil: undefined };
-}
-function cancelIfSettled(state: State, owed: number, paid: number[]): State {
-  return Math.max(0, owed - paid.reduce((sum, n) => sum + n, 0)) <= 0.01 ? { ...state, status: "cancelled", leaseUntil: undefined } : state;
-}
-
-const base: State = { status: "scheduled", attempts: 0, maxAttempts: 3, dueAt: 1000 };
+const base: ReminderState = { status: "scheduled", attempts: 0, maxAttempts: 3, dueAt: 1000 };
 assert.equal(claimReminder(base, 999, 100), null);
 const first = claimReminder(base, 1000, 100)!;
 assert.equal(first.status, "sending");
@@ -22,5 +15,23 @@ assert.equal(retryReminder({ ...first, attempts: 1 }, 1000, 3, 100).dueAt, 1100)
 assert.equal(retryReminder({ ...first, attempts: 3 }, 1000, 3, 100).status, "failed");
 assert.equal(cancelIfSettled(base, 10, [4, 6]).status, "cancelled");
 assert.equal(cancelIfSettled(base, 10, [4, 3]).status, "scheduled");
-assert.equal(`${"share-1"}:${2}`, "share-1:2", "provider idempotency key is stable per share sequence");
-console.log("Reminder schedule, retry, deduplication, and settlement tests passed");
+assert.equal(reminderIdempotencyKey("share-1", 2), "share-1:2", "provider idempotency key is stable per share sequence");
+assert.equal(createSavingsGoalSchema.parse({ title: "Trip", target_amount: 100 }).status, "active");
+assert.equal(recordRepaymentSchema.safeParse({ expense_share_id: "c4f7c50a-cd20-47b7-bc68-46ced200d249", amount: 10, payment_method: "cash" }).success, true);
+assert.equal(recordRepaymentSchema.safeParse({ expense_share_id: "c4f7c50a-cd20-47b7-bc68-46ced200d249", amount: 10, payment_method: "manual_recorded" }).success, false);
+assert.equal(toDatabaseParticipantType("self"), "owner");
+assert.equal(toDatabaseParticipantType("external"), "contact");
+assert.equal(toDatabaseSplitMethod("percentage"), "custom");
+assert.deepEqual(calculateSavingsProgress(100, [
+  { amount: 30, contribution_status: "confirmed" },
+  { amount: 20, contribution_status: "pending" },
+  { amount: 10, contribution_status: "reversed" },
+]), { currentAmount: 30, progressPercent: 30, isGoalMet: false, confirmedContributionCount: 1 });
+const scheduled = nextReminderTime(new Date("2026-11-08T04:00:00.000Z"), {
+  initial_message_enabled: true, frequency_hours: 24, preferred_send_time: "10:00:00", timezone: "Asia/Kolkata",
+}, 1);
+assert.equal(scheduled?.toISOString(), "2026-11-08T04:30:00.000Z");
+assert.equal(nextReminderTime(new Date(), {
+  initial_message_enabled: false, frequency_hours: 24, preferred_send_time: "10:00:00", timezone: "Asia/Kolkata",
+}, 1), null);
+console.log("Batch B schema mapping, reminder schedule/retry/dedupe/settlement, and savings tests passed");

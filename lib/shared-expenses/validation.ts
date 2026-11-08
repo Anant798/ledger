@@ -40,7 +40,7 @@ export const recordRepaymentSchema = z.object({
   expense_share_id: z.string().uuid(),
   amount: z.number().positive().finite(),
   currency_code: z.string().default("INR"),
-  payment_method: z.string().max(50).default("upi"),
+  payment_method: z.enum(["upi", "paypal", "cash", "bank_transfer", "other"]).default("upi"),
   payment_provider: z.string().max(100).optional().nullable(),
   external_reference: z.string().max(100).optional().nullable(),
   idempotency_key: z.string().uuid().optional(),
@@ -51,10 +51,22 @@ export const reminderSettingSchema = z.object({
   initial_message_enabled: z.boolean().default(true),
   frequency_hours: z.number().int().min(1).default(168), // 168 hours = 1 week
   preferred_send_time: z.string().time().default("10:00:00"),
-  timezone: z.string().default("Asia/Kolkata"),
+  timezone: z.string().default("Asia/Kolkata").refine((value) => {
+    try { new Intl.DateTimeFormat("en-US", { timeZone: value }); return true; } catch { return false; }
+  }, "Timezone must be a valid IANA timezone"),
   max_reminders: z.number().int().min(1).max(20).default(5),
   max_attempts: z.number().int().min(1).max(10).default(5),
 });
 
 export type CreateExpenseGroupInput = z.infer<typeof createExpenseGroupSchema>;
 export type RecordRepaymentInput = z.infer<typeof recordRepaymentSchema>;
+
+/** Persisted participant values are constrained by the existing database schema. */
+export function toDatabaseParticipantType(type: CreateExpenseGroupInput["participants"][number]["participant_type"]): "owner" | "contact" {
+  return type === "self" ? "owner" : "contact";
+}
+
+/** Percentage inputs are converted to amounts before persistence, so store them as custom splits. */
+export function toDatabaseSplitMethod(method: CreateExpenseGroupInput["split_method"]): "equal" | "custom" {
+  return method === "equal" ? "equal" : "custom";
+}
