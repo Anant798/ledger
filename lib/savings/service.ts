@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+type Contribution = { contribution_status: string; amount: number | string | null };
 import {
   CreateSavingsGoalInput,
   UpdateSavingsGoalInput,
@@ -25,11 +26,10 @@ export class SavingsService {
     if (error) throw error;
 
     const enriched = (goals || []).map((goal) => {
-      const contributions = goal.contributions || [];
+      const contributions: Contribution[] = (goal.contributions || []).filter((c: Contribution) => c.contribution_status === "confirmed");
       // Only confirmed contributions count
       const confirmedAmount = contributions
-        .filter((c: any) => c.contribution_status === "confirmed")
-        .reduce((sum: number, c: any) => sum + Number(c.amount || 0), 0);
+        .reduce((sum: number, c: Contribution) => sum + Number(c.amount || 0), 0);
 
       const targetAmount = Number(goal.target_amount);
       const progressPercent =
@@ -67,10 +67,10 @@ export class SavingsService {
 
     if (error) throw error;
 
-    const contributions = goal.contributions || [];
+    const contributions: Contribution[] = (goal.contributions || []).filter((c: Contribution) => c.contribution_status === "confirmed");
     const confirmedAmount = contributions
       .filter((c: any) => c.contribution_status === "confirmed")
-      .reduce((sum: number, c: any) => sum + Number(c.amount || 0), 0);
+      .reduce((sum: number, c: Contribution) => sum + Number(c.amount || 0), 0);
 
     const targetAmount = Number(goal.target_amount);
 

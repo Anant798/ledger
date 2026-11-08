@@ -30,6 +30,10 @@ export const createExpenseGroupSchema = z.object({
       });
     }
   }
+  if (data.split_method === "percentage") {
+    const sum = data.participants.reduce((acc, p) => acc + (p.amount_owed || 0), 0);
+    if (Math.abs(sum - 100) > 0.01) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Participant percentages must total 100", path: ["participants"] });
+  }
 });
 
 export const recordRepaymentSchema = z.object({
@@ -48,6 +52,7 @@ export const reminderSettingSchema = z.object({
   preferred_send_time: z.string().time().default("10:00:00"),
   timezone: z.string().default("Asia/Kolkata"),
   max_reminders: z.number().int().min(1).max(20).default(5),
+  max_attempts: z.number().int().min(1).max(10).default(5),
 });
 
 export type CreateExpenseGroupInput = z.infer<typeof createExpenseGroupSchema>;

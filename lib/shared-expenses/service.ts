@@ -40,10 +40,17 @@ export class SharedExpensesService {
         });
       });
 
-      const outstandingBalance = totalOwed - totalRepaid;
+      const outstandingBalance = Math.max(0, totalOwed - totalRepaid);
+      const sharesWithBalances = shares.map((share: any) => {
+        const confirmed = (share.repayments || []).filter((rep: any) => rep.payment_status === "confirmed");
+        const repaid = confirmed.reduce((sum: number, rep: any) => sum + Number(rep.amount || 0), 0);
+        const balance = Math.max(0, Number(share.amount_owed || 0) - repaid);
+        return { ...share, totalRepaid: repaid, outstandingBalance: balance, isSettled: balance <= 0.01, settlementHistory: confirmed };
+      });
 
       return {
         ...grp,
+        shares: sharesWithBalances,
         totalOwed,
         totalRepaid,
         outstandingBalance,
@@ -74,7 +81,14 @@ export class SharedExpensesService {
       .single();
 
     if (error) throw error;
-    return group;
+    if (!group) return null;
+    const shares = (group.shares || []).map((share: any) => {
+      const confirmed = (share.repayments || []).filter((rep: any) => rep.payment_status === "confirmed");
+      const totalRepaid = confirmed.reduce((sum: number, rep: any) => sum + Number(rep.amount || 0), 0);
+      const outstandingBalance = Math.max(0, Number(share.amount_owed || 0) - totalRepaid);
+      return { ...share, totalRepaid, outstandingBalance, isSettled: outstandingBalance <= 0.01, settlementHistory: confirmed };
+    });
+    return { ...group, shares, totalOwed: shares.reduce((s: number, x: any) => s + Number(x.amount_owed || 0), 0), totalRepaid: shares.reduce((s: number, x: any) => s + x.totalRepaid, 0), outstandingBalance: shares.reduce((s: number, x: any) => s + x.outstandingBalance, 0), isFullySettled: shares.every((x: any) => x.isSettled) };
   }
 
   /**
@@ -93,11 +107,18 @@ export class SharedExpensesService {
     } = input;
 
     const count = participants.length;
-    const computedShares = participants.map((p) => {
+    const computedShares = participants.map((p, index) => {
+      if (split_method === "percentage") {
+        const shareAmount = index === participants.length - 1
+          ? Number((total_amount - participants.slice(0, -1).reduce((sum, prior) => sum + Number((total_amount * (prior.amount_owed || 0) / 100).toFixed(2)), 0)).toFixed(2))
+          : Number((total_amount * (p.amount_owed || 0) / 100).toFixed(2));
+        return { ...p, amount_owed: shareAmount };
+      }
       if (split_method === "equal") {
+        const base = Math.floor((total_amount / count) * 100) / 100;
         return {
           ...p,
-          amount_owed: Number((total_amount / count).toFixed(2)),
+          amount_owed: index === count - 1 ? Number((total_amount - base * (count - 1)).toFixed(2)) : base,
         };
       }
       return {
@@ -255,7 +276,7 @@ export class SharedExpensesService {
           .filter((r: any) => r.payment_status === "confirmed")
           .reduce((sum: number, r: any) => sum + Number(r.amount || 0), 0);
 
-        const balance = amountOwed - totalRepaid;
+        const balance = Math.max(0, amountOwed - totalRepaid);
 
         if (balance > 0.01) {
           pending.push({
