@@ -206,22 +206,19 @@ export async function processGmailMessage(
     };
   }
 
-  const bankName = parsed.bankName || "Unknown Bank";
-  const paymentProvider = parsed.recipientOrSenderUpi
-    ? "UPI"
-    : parsed.referenceNumber?.toLowerCase().startsWith("neft")
-    ? "NEFT"
-    : parsed.referenceNumber?.toLowerCase().startsWith("imps")
-    ? "IMPS"
-    : parsed.referenceNumber?.toLowerCase().startsWith("rtgs")
-    ? "RTGS"
-    : "Bank Transfer";
+  const bankName = parsed.bankName?.trim() || "Unknown Bank";
+  // payment_provider is the identity namespace used with external_reference
+  // for deduplication. Keep it tied to the institution, not the transfer rail
+  // (UPI/NEFT/etc. can be shared by unrelated banks).
+  const paymentProvider = bankName.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+  const externalReference = parsed.referenceNumber?.trim() || null;
 
   const isUncertain =
     parsed.confidence < 0.75 ||
     parsed.status !== "completed" ||
     !parsed.currency ||
-    !parsed.bankName;
+    !parsed.bankName ||
+    !externalReference;
   const transactionType = parsed.transactionType;
 
   const normalizedDate = normalizeTransactionDate(parsed.transactionDate);
@@ -249,7 +246,7 @@ export async function processGmailMessage(
         bank_name: bankName,
         payment_provider: paymentProvider,
         account_last4: parsed.accountLast4,
-        external_reference: parsed.referenceNumber,
+        external_reference: externalReference,
         upi_id: parsed.recipientOrSenderUpi,
         confidence: parsed.confidence,
         uncertain_reason: `Confidence (${parsed.confidence}) or missing/uncertain banking metadata.`,
@@ -283,7 +280,7 @@ export async function processGmailMessage(
       bank_name: bankName,
       payment_provider: paymentProvider,
       account_last4: parsed.accountLast4,
-      external_reference: parsed.referenceNumber,
+      external_reference: externalReference,
       occurred_at: occurredAt,
     },
     p_metadata: {

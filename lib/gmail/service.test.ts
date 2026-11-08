@@ -68,7 +68,10 @@ test("Gmail import uses an atomic transaction/event RPC after claiming a message
   assert.equal(result.status, "imported");
   assert.equal(result.transactionId, "txn-1");
   assert.deepEqual(supabase.calls.map((call) => call.name), ["claim_processed_email", "complete_gmail_import"]);
-  assert.equal((supabase.calls[1].args.p_transaction as Record<string, unknown>).transaction_type, "payment");
+  const imported = supabase.calls[1].args.p_transaction as Record<string, unknown>;
+  assert.equal(imported.transaction_type, "payment");
+  assert.equal(imported.payment_provider, "hdfc_bank");
+  assert.equal(imported.external_reference, "UPI/123456");
 });
 
 test("uncertain and non-completed alerts atomically create review items", async () => {
@@ -77,6 +80,23 @@ test("uncertain and non-completed alerts atomically create review items", async 
   assert.equal(result.status, "needs_review");
   assert.equal(result.reviewId, "review-1");
   assert.equal(supabase.calls[1].name, "complete_gmail_review");
+});
+
+test("confident alerts without a bank reference stay in review and use bank identity", async () => {
+  const supabase = fakeSupabase();
+  const result = await processGmailMessage(
+    supabase as unknown as SupabaseClient,
+    fakeGmail() as unknown as ReturnType<typeof google.gmail>,
+    USER_ID,
+    "message-without-reference",
+    async () => ({ ...transaction, referenceNumber: null })
+  );
+
+  assert.equal(result.status, "needs_review");
+  assert.equal(supabase.calls[1]?.name, "complete_gmail_review");
+  const review = supabase.calls[1]?.args.p_review as Record<string, unknown>;
+  assert.equal(review.payment_provider, "hdfc_bank");
+  assert.equal(review.external_reference, null);
 });
 
 test("duplicate delivery claims do not retrieve or process the Gmail message again", async () => {

@@ -25,6 +25,7 @@ export async function POST(request: Request) {
       .select("user_id, last_synced_at, watch_expiration")
       .eq("provider", "gmail")
       .or(`last_synced_at.is.null,last_synced_at.lt.${thirtyMinutesAgo},watch_expiration.is.null,watch_expiration.lt.${twentyFourHoursFromNow}`)
+      .order("last_synced_at", { ascending: true, nullsFirst: true })
       .limit(10);
 
     if (error) throw error;
@@ -43,9 +44,8 @@ export async function POST(request: Request) {
 
       // Check if Gmail Pub/Sub watch is expiring within 24 hours (or expired) and renew it automatically
       if (GOOGLE_PUBSUB_TOPIC) {
-        const isWatchExpiringSoon =
-          !item.watch_expiration ||
-          new Date(item.watch_expiration).toISOString() < twentyFourHoursFromNow;
+        const expiration = item.watch_expiration ? Date.parse(item.watch_expiration) : Number.NaN;
+        const isWatchExpiringSoon = !Number.isFinite(expiration) || expiration < now + 24 * 60 * 60 * 1000;
 
         if (isWatchExpiringSoon) {
           try {

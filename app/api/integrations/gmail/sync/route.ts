@@ -45,9 +45,9 @@ export async function POST(request: Request) {
       result: syncResult,
     });
   } catch (error: unknown) {
-    console.error("Manual sync endpoint error:", error);
+    console.error("Manual Gmail sync failed:", error instanceof Error ? error.name : "unknown error");
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to synchronize Gmail" },
+      { error: "Failed to synchronize Gmail." },
       { status: 500 }
     );
   }

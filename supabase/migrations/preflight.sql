@@ -10,6 +10,19 @@ GROUP BY user_id, payment_provider, external_reference HAVING count(*) > 1;
 -- Rows returned: manually determine whether these are true duplicate imports or
 -- distinct real transactions. Do not delete/merge financial records automatically.
 
+-- 1b. Same user/reference appearing under multiple provider labels. This catches
+-- older imports that used a payment rail (such as UPI) where the revised Gmail
+-- importer uses the bank identity. It is a review query, not proof of duplicate.
+SELECT user_id, external_reference, count(*) AS row_count,
+       array_agg(DISTINCT payment_provider) AS provider_labels,
+       array_agg(id ORDER BY id) AS transaction_ids
+FROM public.transactions
+WHERE external_reference IS NOT NULL AND external_reference <> ''
+GROUP BY user_id, external_reference HAVING count(*) > 1
+  AND count(DISTINCT payment_provider) > 1;
+-- Rows returned: compare bank_name, account_last4, amount and date with source
+-- records. Some references can legitimately overlap across institutions.
+
 -- 2. Duplicate webhook event keys.
 SELECT provider, provider_event_id, count(*) AS row_count, array_agg(id ORDER BY id) AS event_ids
 FROM public.webhook_events
@@ -133,3 +146,46 @@ WHERE n.nspname='public' AND c.relname IN ('transactions','alerts','ai_messages'
 ORDER BY table_name,index_name;
 -- Keep indexes supporting FK checks, unique constraints, active application
 -- queries and idempotency. Advisor 'unused' results alone do not prove redundancy.
+
+-- 11. Expense Groups module additive-column conflicts and definitions.
+SELECT c.relname AS table_name, a.attname AS column_name,
+       format_type(a.atttypid,a.atttypmod) AS data_type, a.attnotnull AS not_null,
+       pg_get_expr(d.adbin,d.adrelid) AS default_expression
+FROM pg_class c JOIN pg_namespace ns ON ns.oid=c.relnamespace
+JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
+LEFT JOIN pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum
+WHERE ns.nspname='public' AND c.relname IN ('expense_groups','expense_shares')
+  AND a.attname IN ('archived_at','is_active')
+ORDER BY c.relname,a.attname;
+-- No rows means the additive columns are absent. Existing rows must be checked
+-- against expected types/defaults; do not use IF NOT EXISTS to mask a mismatch.
+
+-- 12. Existing function signatures and trigger bindings replaced/relied on by
+-- the Expense Groups module migration.
+SELECT p.oid::regprocedure AS function_signature, p.prosecdef AS security_definer,
+       p.proconfig AS function_settings, pg_get_functiondef(p.oid) AS function_definition,
+       has_function_privilege('anon',p.oid,'EXECUTE') AS anon_can_execute,
+       has_function_privilege('authenticated',p.oid,'EXECUTE') AS authenticated_can_execute,
+       has_function_privilege('service_role',p.oid,'EXECUTE') AS service_role_can_execute
+FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+WHERE n.nspname='public' AND p.proname IN (
+  'create_shared_expense_group','record_shared_expense_repayment',
+  'schedule_expense_reminders','schedule_followup_expense_reminder',
+  'update_shared_expense_group','set_expense_group_archived'
+)
+ORDER BY p.proname,p.oid::regprocedure::text;
+-- Compare replacement signatures, parameter types, bodies, and grants before
+-- deployment. A pre-existing same signature with different semantics needs a
+-- separately reviewed compatibility adjustment.
+
+SELECT t.tgrelid::regclass AS table_name, t.tgname,
+       pg_get_triggerdef(t.oid,true) AS trigger_definition,
+       t.tgfoid::regprocedure AS function_signature
+FROM pg_trigger t
+WHERE NOT t.tgisinternal AND t.tgrelid IN (
+  'public.expense_groups'::regclass,'public.expense_shares'::regclass,
+  'public.repayments'::regclass,'public.reminder_logs'::regclass
+)
+ORDER BY table_name,t.tgname;
+-- Preserve unrelated triggers. Verify reminder cancellation trigger order and
+-- that no local trigger conflicts with the new archive/share lifecycle RPCs.

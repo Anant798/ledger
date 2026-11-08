@@ -103,9 +103,9 @@ export async function GET(request: Request) {
       new URL("/dashboard?integration=gmail_connected", request.url)
     );
   } catch (err: unknown) {
-    console.error("Gmail OAuth Callback Exception:", err);
+    console.error("Gmail OAuth callback failed:", err instanceof Error ? err.name : "unknown error");
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to process OAuth callback." },
+      { error: "Failed to process Gmail authorization." },
       { status: 500 }
     );
   }

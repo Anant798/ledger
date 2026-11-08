@@ -1,20 +1,21 @@
 import { createClient } from "@/lib/supabase/server";
 import {
   CreateExpenseGroupInput,
+  UpdateExpenseGroupInput,
   RecordRepaymentInput,
   toDatabaseParticipantType,
   toDatabaseSplitMethod,
 } from "./validation";
-import { calculateShareBalance, calculateSplit } from "./calculations";
+import { calculateExpenseGroupBalance, calculateShareBalance, calculateSplit } from "./calculations";
 import { resolveOwnerId } from "./integration-helpers";
-type ShareRow = { amount_owed: number | string; repayments?: Array<{ amount: number | string | null; payment_status: string }>; totalRepaid?: number; outstandingBalance?: number; isSettled?: boolean; [key: string]: unknown };
+type ShareRow = { id: string; amount_owed: number | string; participant_type?: string; is_active?: boolean | null; repayments?: Array<{ amount: number | string | null; payment_status: string }>; totalRepaid?: number; outstandingBalance?: number; isSettled?: boolean; [key: string]: unknown };
 type RepaymentRow = { amount: number | string | null; payment_status: string };
 
 export class SharedExpensesService {
   /**
    * List all expense groups for the user with calculated outstanding balances
    */
-  static async list(userId: string) {
+  static async list(userId: string, archived = false) {
     const supabase = await createClient();
 
     const { data: groups, error } = await supabase
@@ -31,37 +32,9 @@ export class SharedExpensesService {
 
     if (error) throw error;
 
-    const enriched = (groups || []).map((grp) => {
-      const shares = grp.shares || [];
-
-      let totalOwed = 0;
-      let totalRepaid = 0;
-
-      shares.forEach((share: ShareRow) => {
-        totalOwed += Number(share.amount_owed || 0);
-        (share.repayments || []).forEach((rep) => {
-          if (rep.payment_status === "confirmed") {
-            totalRepaid += Number(rep.amount || 0);
-          }
-        });
-      });
-
-      const outstandingBalance = Math.max(0, totalOwed - totalRepaid);
-      const sharesWithBalances = shares.map((share: ShareRow) => {
-        return { ...share, ...calculateShareBalance(Number(share.amount_owed || 0), share.repayments || []) };
-      });
-
-      return {
-        ...grp,
-        shares: sharesWithBalances,
-        totalOwed,
-        totalRepaid,
-        outstandingBalance,
-        isFullySettled: outstandingBalance <= 0,
-      };
-    });
-
-    return enriched;
+    return (groups || [])
+      .filter((group) => Boolean(group.archived_at) === archived)
+      .map((group) => this.withBalances(group));
   }
 
   /**
@@ -81,14 +54,24 @@ export class SharedExpensesService {
       `)
       .eq("id", groupId)
       .eq("user_id", userId)
-      .single();
+      .maybeSingle();
 
     if (error) throw error;
     if (!group) return null;
-    const shares = (group.shares || []).map((share: ShareRow) => {
-      return { ...share, ...calculateShareBalance(Number(share.amount_owed || 0), share.repayments || []) };
-    });
-    return { ...group, shares, totalOwed: shares.reduce((sum: number, share: ShareRow) => sum + Number(share.amount_owed || 0), 0), totalRepaid: shares.reduce((sum: number, share: ShareRow) => sum + Number(share.totalRepaid || 0), 0), outstandingBalance: shares.reduce((sum: number, share: ShareRow) => sum + Number(share.outstandingBalance || 0), 0), isFullySettled: shares.every((share: ShareRow) => share.isSettled === true) };
+    return this.withBalances(group);
+  }
+
+  private static withBalances<T extends { shares?: ShareRow[] }>(group: T) {
+    const shares = (group.shares || []).map((share) => ({
+      ...share,
+      ...calculateShareBalance(Number(share.amount_owed || 0), share.repayments || []),
+    }));
+    return {
+      ...group,
+      shares,
+      ...calculateExpenseGroupBalance(shares),
+      activeShares: shares.filter((share) => share.is_active !== false),
+    };
   }
 
   /**
@@ -131,6 +114,45 @@ export class SharedExpensesService {
     return data;
   }
 
+  static async update(userId: string, groupId: string, input: UpdateExpenseGroupInput) {
+    if (input.archived !== undefined) return this.setArchived(userId, groupId, input.archived);
+    const supabase = await createClient();
+    const amounts = calculateSplit(input.total_amount, input.split_method, input.participants.map((participant) => participant.amount_owed || 0));
+    const { data, error } = await supabase.rpc("update_shared_expense_group", {
+      p_user_id: userId,
+      p_group_id: groupId,
+      p_group: {
+        title: input.title,
+        total_amount: input.total_amount,
+        currency_code: input.currency_code,
+        split_method: toDatabaseSplitMethod(input.split_method),
+        transaction_id: input.transaction_id || null,
+      },
+      p_shares: input.participants.map((participant, index) => ({
+        id: participant.id || null,
+        participant_type: toDatabaseParticipantType(participant.participant_type),
+        participant_name: participant.participant_name,
+        participant_user_id: participant.participant_type === "self" ? userId : participant.user_id || null,
+        email: participant.email || null,
+        phone_number: participant.phone_number || null,
+        amount_owed: amounts[index],
+      })),
+    });
+    if (error) throw error;
+    return data;
+  }
+
+  static async setArchived(userId: string, groupId: string, archived: boolean) {
+    const supabase = await createClient();
+    const { data, error } = await supabase.rpc("set_expense_group_archived", {
+      p_user_id: userId,
+      p_group_id: groupId,
+      p_archived: archived,
+    });
+    if (error) throw error;
+    return data;
+  }
+
   /**
    * Secure repayment recording with strict ownership & balance validation.
    * Ledger only records repayments; it never executes payment transfers.
@@ -143,13 +165,14 @@ export class SharedExpensesService {
       .from("expense_shares")
       .select(`
         *,
-        group:expense_groups!inner(user_id, id, title),
+        group:expense_groups!inner(user_id, id, title, archived_at),
         repayments(*)
       `)
       .eq("id", input.expense_share_id)
       .single();
 
-    if (shareErr || !share || resolveOwnerId(share.group) !== userId) {
+    const relatedGroup = Array.isArray(share?.group) ? share.group[0] : share?.group;
+    if (shareErr || !share || share.is_active === false || resolveOwnerId(share.group) !== userId || relatedGroup?.archived_at) {
       throw new Error("Expense share not found or access denied.");
     }
 
@@ -187,7 +210,8 @@ export class SharedExpensesService {
           repayments(*)
         )
       `)
-      .eq("user_id", userId);
+      .eq("user_id", userId)
+      .is("archived_at", null);
 
     if (error) throw error;
 
@@ -195,6 +219,7 @@ export class SharedExpensesService {
 
     for (const grp of groups || []) {
       for (const share of grp.shares || []) {
+        if (share.is_active === false || share.participant_type === "owner") continue;
         const amountOwed = Number(share.amount_owed || 0);
         const totalRepaid = ((share.repayments || []) as RepaymentRow[])
           .filter((r) => r.payment_status === "confirmed")

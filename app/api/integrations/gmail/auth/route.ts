@@ -23,9 +23,9 @@ export async function GET() {
 
     return NextResponse.json({ authUrl });
   } catch (error: unknown) {
-    console.error("Gmail OAuth Init Error:", error);
+    console.error("Gmail OAuth initialization failed:", error instanceof Error ? error.name : "unknown error");
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to initialize Gmail OAuth" },
+      { error: "Failed to initialize Gmail OAuth." },
       { status: 500 }
     );
   }

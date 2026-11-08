@@ -1,5 +1,10 @@
+-- ARCHIVAL SNAPSHOT: DO NOT EXECUTE AS A MIGRATION.
+-- This file predates the ordered migrations under supabase/migrations/ and
+-- contains overlapping legacy table/function definitions. Use the ordered
+-- Supabase CLI migrations and their preflight queries as the schema change
+-- source of truth. This file is retained only as historical reference.
 -- ============================================================================
--- LEDGER DATABASE SCHEMA: ADDITIVE MIGRATION ONLY
+-- LEDGER DATABASE SCHEMA: ADDITIVE MIGRATION ONLY (LEGACY SNAPSHOT)
 -- Preserves all 16 existing tables, relationships, and RLS policies.
 -- Do NOT execute directly on production without review.
 -- ============================================================================

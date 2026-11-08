@@ -7,10 +7,11 @@ import test from "node:test";
 const directory = dirname(fileURLToPath(import.meta.url));
 const batchA = await readFile(join(directory, "20261108000000_batch_a_backend_closure.sql"), "utf8");
 const batchB = await readFile(join(directory, "20261108000100_expense_reminders.sql"), "utf8");
-const allSql = `${batchA}\n${batchB}`;
+const expenseGroups = await readFile(join(directory, "20261108000200_expense_groups_module.sql"), "utf8");
+const allSql = `${batchA}\n${batchB}\n${expenseGroups}`;
 
 test("migration versions are unique and ordered", () => {
-  const versions = ["20261108000000", "20261108000100"];
+  const versions = ["20261108000000", "20261108000100", "20261108000200"];
   assert.equal(new Set(versions).size, versions.length);
   assert.deepEqual([...versions].sort(), versions);
 });
@@ -48,6 +49,8 @@ test("reminder scheduling validates timezones and uses preferences with idempote
   assert.match(batchB, /ON CONFLICT \(idempotency_key\) DO NOTHING/);
   assert.match(batchB, /lease_until < now\(\)/);
   assert.match(batchB, /cancel_expense_reminders_for_share\(uuid\) FROM PUBLIC, anon, authenticated/);
+  assert.match(batchB, /outcome='cancelled', error='Share settled'/);
+  assert.match(batchB, /outcome='cancelled', error='Reminders disabled by user'/);
 });
 
 test("Gmail approval dedupe is scoped by user, provider and reference", () => {
@@ -74,4 +77,19 @@ test("linked savings contributions recalculate on refunds and reversals", () => 
   assert.match(batchB, /v_refunded >= gc\.amount THEN 'reversed'/);
   assert.match(batchB, /ON DELETE SET NULL/);
   assert.match(batchB, /v_source_status IN \('failed','cancelled','refunded'\)/);
+});
+
+test("expense group lifecycle migration preserves payment history and scopes mutations", () => {
+  assert.match(expenseGroups, /ADD COLUMN IF NOT EXISTS archived_at timestamptz/i);
+  assert.match(expenseGroups, /ADD COLUMN IF NOT EXISTS is_active boolean NOT NULL DEFAULT true/i);
+  assert.match(expenseGroups, /CREATE OR REPLACE FUNCTION public\.create_shared_expense_group/i);
+  assert.match(expenseGroups, /Invalid participant share/i);
+  assert.match(expenseGroups, /WHERE id=p_group_id AND user_id=p_user_id FOR UPDATE/i);
+  assert.match(expenseGroups, /Expense amount, currency, transaction and participant set are locked after repayments exist/i);
+  assert.match(expenseGroups, /is_active=false/i);
+  assert.match(expenseGroups, /delivery_status='cancelled'/i);
+  assert.doesNotMatch(expenseGroups, /DELETE\s+FROM\s+public\.(expense_groups|expense_shares|repayments)/i);
+  assert.match(expenseGroups, /g\.archived_at IS NULL/i);
+  assert.match(expenseGroups, /s\.is_active=true/i);
+  assert.match(expenseGroups, /REVOKE ALL ON FUNCTION public\.set_expense_group_archived\(uuid,uuid,boolean\) FROM PUBLIC,anon/i);
 });

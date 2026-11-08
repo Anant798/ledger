@@ -340,9 +340,15 @@ BEGIN
   FROM public.reminder_settings s
   WHERE s.user_id=p_user_id AND r.user_id=p_user_id AND r.delivery_status='scheduled'
     AND r.attempt_count>=s.max_attempts;
+  UPDATE public.reminder_attempts a SET outcome='cancelled', error='Reminder settings changed', next_attempt_at=NULL
+  WHERE a.user_id=p_user_id AND a.outcome='started' AND a.reminder_log_id IN (
+    SELECT r.id FROM public.reminder_logs r JOIN public.reminder_settings s ON s.user_id=r.user_id
+    WHERE s.user_id=p_user_id AND r.user_id=p_user_id AND r.delivery_status IN ('scheduled','sending')
+      AND (r.reminder_sequence>s.max_reminders OR (r.reminder_sequence=1 AND NOT s.initial_message_enabled))
+  );
   UPDATE public.reminder_logs r SET delivery_status='cancelled',lease_until=NULL
   FROM public.reminder_settings s
-  WHERE s.user_id=p_user_id AND r.user_id=p_user_id AND r.delivery_status='scheduled'
+  WHERE s.user_id=p_user_id AND r.user_id=p_user_id AND r.delivery_status IN ('scheduled','sending')
     AND (r.reminder_sequence>s.max_reminders OR (r.reminder_sequence=1 AND NOT s.initial_message_enabled));
   UPDATE public.reminder_logs r SET
     scheduled_for=CASE WHEN r.reminder_sequence=1
@@ -364,6 +370,11 @@ RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, 
 DECLARE v_count integer;
 BEGIN
   IF auth.uid() IS NOT NULL AND auth.uid() <> p_user_id THEN RAISE EXCEPTION 'not authorized'; END IF;
+  UPDATE public.reminder_attempts a SET outcome='cancelled', error='Reminders disabled by user', next_attempt_at=NULL
+    WHERE a.user_id=p_user_id AND a.outcome='started' AND a.reminder_log_id IN (
+      SELECT id FROM public.reminder_logs WHERE user_id=p_user_id
+        AND delivery_status IN ('scheduled','sending')
+    );
   UPDATE public.reminder_logs SET delivery_status = 'cancelled', lease_until = NULL
     WHERE user_id = p_user_id AND delivery_status IN ('scheduled', 'sending');
   GET DIAGNOSTICS v_count = ROW_COUNT;
@@ -458,6 +469,11 @@ BEGIN
   SELECT COALESCE(SUM(amount), 0) INTO v_paid FROM public.repayments
     WHERE expense_share_id = p_share AND payment_status = 'confirmed';
   IF v_owed IS NULL OR v_paid >= v_owed - 0.01 THEN
+    UPDATE public.reminder_attempts a SET outcome='cancelled', error='Share settled', next_attempt_at=NULL
+      WHERE a.outcome='started' AND a.reminder_log_id IN (
+        SELECT id FROM public.reminder_logs WHERE expense_share_id=p_share
+          AND delivery_status IN ('scheduled','sending')
+      );
     UPDATE public.reminder_logs SET delivery_status = 'cancelled',
       lease_until = NULL WHERE expense_share_id = p_share
       AND delivery_status IN ('scheduled', 'sending');

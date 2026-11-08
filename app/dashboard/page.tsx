@@ -2,6 +2,7 @@
 import { redirect } from "next/navigation";
 import { connection } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import ExpenseGroups from "@/components/expense-groups";
 
 export default async function DashboardPage() {
   // Wait for an incoming request before rendering.
@@ -43,9 +44,11 @@ export default async function DashboardPage() {
         </p>
 
         <p className="mt-6 text-sm text-[#897653]">
-          Your financial workspace is being prepared.
+          Keep shared costs clear and repayment history together.
         </p>
       </section>
+
+      <ExpenseGroups />
     </main>
   );
 }

@@ -28,8 +28,10 @@ export function encryptToken(plainText: string): string {
 export function decryptToken(cipherText: string): string {
   if (!cipherText) return "";
   const parts = cipherText.split(":");
-  if (parts.length !== 3 || !/^(?:[a-f0-9]{24}|[a-f0-9]{32})$/i.test(parts[0]) ||
-      !/^[a-f0-9]{32}$/i.test(parts[1]) || !/^(?:[a-f0-9]{2})+$/i.test(parts[2])) return cipherText;
+  if (parts.length !== 3 || !/^[a-f0-9]{24}$/i.test(parts[0]) ||
+      !/^[a-f0-9]{32}$/i.test(parts[1]) || !/^(?:[a-f0-9]{2})+$/i.test(parts[2])) {
+    throw new Error("Stored Gmail credential is not in the expected encrypted format.");
+  }
 
   const [ivHex, tagHex, encrypted] = parts;
   const iv = Buffer.from(ivHex, "hex");

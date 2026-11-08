@@ -4,7 +4,7 @@ import { SharedExpensesService } from "@/lib/shared-expenses/service";
 import { createExpenseGroupSchema } from "@/lib/shared-expenses/validation";
 
 // GET: List all expense groups
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const supabase = await createClient();
 
@@ -17,7 +17,8 @@ export async function GET() {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const expenses = await SharedExpensesService.list(user.id);
+    const archived = new URL(request.url).searchParams.get("archived") === "true";
+    const expenses = await SharedExpensesService.list(user.id, archived);
     return NextResponse.json({ expenses });
   } catch (error: unknown) {
     console.error("List shared expenses error:", error);
