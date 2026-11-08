@@ -56,7 +56,9 @@ export const updateTransactionSchema = z.object({
 export const transactionQuerySchema = z.object({
   direction: directionEnum.optional(),
   status: transactionStatusEnum.optional(),
+  // Accepts payment_provider directly, or source as an alias for client convenience
   payment_provider: z.string().optional(),
+  source: z.string().optional(),
   startDate: z.string().optional(),
   endDate: z.string().optional(),
   search: z.string().optional(),

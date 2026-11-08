@@ -13,6 +13,7 @@ const resolveReviewSchema = z.object({
       amount: z.number().positive().optional(),
       direction: z.enum(["debit", "credit"]).optional(),
       description: z.string().optional(),
+      category: z.string().optional(),
     })
     .optional(),
 });
@@ -50,7 +51,7 @@ export async function GET() {
   }
 }
 
-// POST: Approve or reject an item in import_review_queue
+// POST: Approve or reject an item in import_review_queue with idempotency protection
 export async function POST(request: Request) {
   try {
     const supabase = await createClient();
@@ -88,6 +89,18 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Review item not found" }, { status: 404 });
     }
 
+    // IDEMPOTENCY CHECK: Prevent repeated approvals or actions from creating duplicate transactions
+    if (item.review_status !== "pending") {
+      return NextResponse.json(
+        {
+          error: `Review item has already been ${item.review_status}.`,
+          reviewStatus: item.review_status,
+          transactionId: item.created_transaction_id || undefined,
+        },
+        { status: 409 }
+      );
+    }
+
     if (action === "reject") {
       const { data: updatedItem, error: updateErr } = await supabase
         .from("import_review_queue")
@@ -103,13 +116,49 @@ export async function POST(request: Request) {
 
       if (updateErr) throw updateErr;
 
+      // Update related alert if any
+      await supabase
+        .from("alerts")
+        .update({ is_resolved: true, resolved_at: new Date().toISOString() })
+        .eq("user_id", user.id)
+        .eq("alert_type", "transaction_review")
+        .ilike("message", `%${item.amount}%`);
+
       return NextResponse.json({
         message: "Import item rejected",
         item: updatedItem,
       });
     }
 
-    // Action === 'approve': Create standard confirmed transaction in transactions table
+    // Action === 'approve':
+    // 1. Double check external_reference duplicate if present
+    if (item.external_reference) {
+      const { data: existingTxn } = await supabase
+        .from("transactions")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("external_reference", item.external_reference)
+        .maybeSingle();
+
+      if (existingTxn) {
+        await supabase
+          .from("import_review_queue")
+          .update({
+            review_status: "approved",
+            resolved_at: new Date().toISOString(),
+            created_transaction_id: existingTxn.id,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", reviewId);
+
+        return NextResponse.json({
+          message: "Transaction already exists with this reference. Review marked as approved.",
+          transactionId: existingTxn.id,
+        });
+      }
+    }
+
+    // 2. Create confirmed transaction in transactions table
     const finalAmount = updates?.amount || item.amount;
     const finalDirection = updates?.direction || item.direction;
     const finalMerchant = updates?.merchant_name ?? item.merchant_name;
@@ -139,18 +188,7 @@ export async function POST(request: Request) {
 
     if (insertTxnErr) throw insertTxnErr;
 
-    // Log to ledger_events
-    await supabase.from("ledger_events").insert({
-      transaction_id: newTxn.id,
-      user_id: user.id,
-      event_type: "review_queue_approved",
-      event_source: "manual",
-      description: `Transaction approved from review queue item ${reviewId}`,
-      metadata: { review_id: reviewId, original_confidence: item.confidence },
-      occurred_at: new Date().toISOString(),
-    });
-
-    // Update review item state
+    // 3. Atomically update review item
     await supabase
       .from("import_review_queue")
       .update({
@@ -161,6 +199,41 @@ export async function POST(request: Request) {
       })
       .eq("id", reviewId)
       .eq("user_id", user.id);
+
+    // 4. Update processed_emails record with created transaction_id
+    if (item.email_message_id) {
+      await supabase
+        .from("processed_emails")
+        .update({
+          status: "parsed",
+          transaction_id: newTxn.id,
+        })
+        .eq("user_id", user.id)
+        .eq("message_id", item.email_message_id);
+    }
+
+    // 5. Log ledger event
+    await supabase.from("ledger_events").insert({
+      transaction_id: newTxn.id,
+      user_id: user.id,
+      event_type: "review_queue_approved",
+      event_source: "manual",
+      description: `Transaction approved from review queue item ${reviewId}`,
+      metadata: {
+        review_id: reviewId,
+        original_confidence: item.confidence,
+        corrections: updates || null,
+      },
+      occurred_at: new Date().toISOString(),
+    });
+
+    // 6. Mark review alerts as resolved
+    await supabase
+      .from("alerts")
+      .update({ is_resolved: true, resolved_at: new Date().toISOString() })
+      .eq("user_id", user.id)
+      .eq("alert_type", "transaction_review")
+      .ilike("message", `%${item.amount}%`);
 
     return NextResponse.json({
       message: "Transaction approved and confirmed",

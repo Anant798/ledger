@@ -7,7 +7,8 @@ import {
 
 export class TransactionService {
   /**
-   * List transactions with filters, search, and pagination
+   * List transactions with filters, search, and pagination.
+   * Resolves the source vs payment_provider mismatch cleanly.
    */
   static async list(userId: string, params: TransactionQueryParams) {
     const supabase = await createClient();
@@ -25,8 +26,11 @@ export class TransactionService {
       query = query.eq("status", params.status);
     }
 
-    if (params.payment_provider) {
-      query = query.eq("payment_provider", params.payment_provider);
+    // Resolve source vs payment_provider:
+    // If payment_provider is passed, use it. If source is passed, map it to payment_provider.
+    const providerFilter = params.payment_provider || params.source;
+    if (providerFilter) {
+      query = query.eq("payment_provider", providerFilter);
     }
 
     if (params.startDate) {
@@ -98,7 +102,7 @@ export class TransactionService {
         description: input.description,
         merchant_name: input.merchant_name,
         bank_name: input.bank_name,
-        payment_provider: input.payment_provider,
+        payment_provider: input.payment_provider || "manual",
         account_last4: input.account_last4,
         external_reference: input.external_reference,
         related_transaction_id: input.related_transaction_id,
@@ -157,7 +161,7 @@ export class TransactionService {
   }
 
   /**
-   * Delete transaction
+   * Delete transaction and its corresponding ledger events
    */
   static async delete(userId: string, id: string) {
     const supabase = await createClient();
