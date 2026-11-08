@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS public.server_oauth_tokens (
     scope TEXT,
     history_id TEXT,
     next_page_token TEXT,
+    history_page_token TEXT,
     initial_sync_completed BOOLEAN NOT NULL DEFAULT false,
     watch_expiration TIMESTAMPTZ,
     last_synced_at TIMESTAMPTZ,
@@ -62,7 +63,8 @@ CREATE POLICY "Users can view their own processed email logs"
     USING (auth.uid() = user_id);
 
 -- 3. IMPORT REVIEW QUEUE (Preserves transactions table status values)
--- Correct composite foreign key referencing (user_id, message_id) in processed_emails
+-- Composite foreign key references (user_id, message_id) in processed_emails.
+-- ON DELETE CASCADE ensures user_id is never set to NULL.
 CREATE TABLE IF NOT EXISTS public.import_review_queue (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -88,7 +90,7 @@ CREATE TABLE IF NOT EXISTS public.import_review_queue (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT fk_import_review_processed_email FOREIGN KEY (user_id, email_message_id) 
-        REFERENCES public.processed_emails(user_id, message_id) ON DELETE SET NULL
+        REFERENCES public.processed_emails(user_id, message_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_import_review_user ON public.import_review_queue(user_id, review_status);
@@ -107,10 +109,10 @@ CREATE POLICY "Users can update review items"
     WITH CHECK (auth.uid() = user_id);
 
 -- 4. ATOMIC REVIEW APPROVAL RPC (Supabase Stored Procedure)
+-- SECURITY DEFINER with fixed search_path and strict caller verification (auth.uid() = p_user_id)
 -- Atomically claims the pending review item with FOR UPDATE,
 -- inserts the confirmed transaction and ledger_events,
 -- updates processed_emails, resolves alerts, and marks the review item approved.
--- Concurrent approvals are locked out and return 409 conflict safely.
 CREATE OR REPLACE FUNCTION public.approve_review_queue_item(
     p_user_id UUID,
     p_review_id UUID,
@@ -124,8 +126,10 @@ CREATE OR REPLACE FUNCTION public.approve_review_queue_item(
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 DECLARE
+    v_caller_id UUID;
     v_review_item RECORD;
     v_new_transaction RECORD;
     v_final_amount NUMERIC;
@@ -136,17 +140,31 @@ DECLARE
     v_final_desc TEXT;
     v_existing_txn_id UUID;
 BEGIN
-    -- 1. Atomically lock and retrieve the review item
+    -- 1. Security Check: Enforce caller ownership when called from authenticated context
+    v_caller_id := auth.uid();
+    IF v_caller_id IS NOT NULL AND v_caller_id != p_user_id THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'error', 'Forbidden: Caller does not own this resource',
+            'status', 403
+        );
+    END IF;
+
+    -- 2. Atomically lock and retrieve the review item
     SELECT * INTO v_review_item
     FROM public.import_review_queue
     WHERE id = p_review_id AND user_id = p_user_id
     FOR UPDATE;
 
     IF NOT FOUND THEN
-        RETURN jsonb_build_object('success', false, 'error', 'Review item not found', 'status', 404);
+        RETURN jsonb_build_object(
+            'success', false,
+            'error', 'Review item not found',
+            'status', 404
+        );
     END IF;
 
-    -- 2. Idempotency Check
+    -- 3. Idempotency Check
     IF v_review_item.review_status != 'pending' THEN
         RETURN jsonb_build_object(
             'success', false, 
@@ -157,7 +175,7 @@ BEGIN
         );
     END IF;
 
-    -- 3. Check for existing transaction if external_reference is present
+    -- 4. Check for existing transaction if external_reference is present (Duplicate-transaction branch)
     IF v_review_item.external_reference IS NOT NULL THEN
         SELECT id INTO v_existing_txn_id
         FROM public.transactions
@@ -166,6 +184,7 @@ BEGIN
         LIMIT 1;
 
         IF v_existing_txn_id IS NOT NULL THEN
+            -- Mark review item approved with existing transaction ID
             UPDATE public.import_review_queue
             SET review_status = 'approved',
                 created_transaction_id = v_existing_txn_id,
@@ -173,15 +192,31 @@ BEGIN
                 updated_at = now()
             WHERE id = p_review_id;
 
+            -- Also update processed_emails if email_message_id is present
+            IF v_review_item.email_message_id IS NOT NULL THEN
+                UPDATE public.processed_emails
+                SET status = 'parsed',
+                    transaction_id = v_existing_txn_id
+                WHERE user_id = p_user_id AND message_id = v_review_item.email_message_id;
+            END IF;
+
+            -- Also resolve corresponding alert
+            UPDATE public.alerts
+            SET is_resolved = true,
+                resolved_at = now()
+            WHERE user_id = p_user_id
+              AND alert_type = 'transaction_review'
+              AND message LIKE '%' || v_review_item.amount || '%';
+
             RETURN jsonb_build_object(
                 'success', true,
-                'message', 'Transaction already exists with this reference. Marked as approved.',
+                'message', 'Transaction already exists with this reference. Review marked as approved.',
                 'transaction_id', v_existing_txn_id
             );
         END IF;
     END IF;
 
-    -- 4. Apply user corrections or fallback to original values
+    -- 5. Apply user corrections or fallback to original values
     v_final_amount := COALESCE(p_amount, v_review_item.amount);
     v_final_direction := COALESCE(p_direction, v_review_item.direction);
     v_final_merchant := COALESCE(p_merchant_name, v_review_item.merchant_name);
@@ -189,7 +224,7 @@ BEGIN
     v_final_provider := COALESCE(p_payment_provider, v_review_item.payment_provider);
     v_final_desc := COALESCE(p_description, v_review_item.description);
 
-    -- 5. Insert new confirmed transaction
+    -- 6. Insert new confirmed transaction
     INSERT INTO public.transactions (
         user_id,
         transaction_type,
@@ -221,7 +256,7 @@ BEGIN
     )
     RETURNING * INTO v_new_transaction;
 
-    -- 6. Insert audit event into ledger_events
+    -- 7. Insert audit event into ledger_events
     INSERT INTO public.ledger_events (
         transaction_id,
         user_id,
@@ -244,7 +279,7 @@ BEGIN
         now()
     );
 
-    -- 7. Update import_review_queue item to approved
+    -- 8. Update import_review_queue item to approved
     UPDATE public.import_review_queue
     SET review_status = 'approved',
         created_transaction_id = v_new_transaction.id,
@@ -252,7 +287,7 @@ BEGIN
         updated_at = now()
     WHERE id = p_review_id;
 
-    -- 8. Update processed_emails with new transaction_id
+    -- 9. Update processed_emails with new transaction_id
     IF v_review_item.email_message_id IS NOT NULL THEN
         UPDATE public.processed_emails
         SET status = 'parsed',
@@ -260,7 +295,7 @@ BEGIN
         WHERE user_id = p_user_id AND message_id = v_review_item.email_message_id;
     END IF;
 
-    -- 9. Resolve any corresponding alerts
+    -- 10. Resolve any corresponding alerts
     UPDATE public.alerts
     SET is_resolved = true,
         resolved_at = now()
@@ -275,6 +310,12 @@ BEGIN
     );
 END;
 $$;
+
+-- Restrict execute permissions appropriately: only authenticated users & service role
+REVOKE ALL ON FUNCTION public.approve_review_queue_item(UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.approve_review_queue_item(UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, TEXT, TEXT) FROM anon;
+GRANT EXECUTE ON FUNCTION public.approve_review_queue_item(UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, TEXT, TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.approve_review_queue_item(UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, TEXT, TEXT) TO service_role;
 
 -- 5. SAFE ADDITIONS TO transactions TABLE (Optional / Non-breaking)
 DO $$ 

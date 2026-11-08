@@ -19,6 +19,7 @@ export interface SyncResult {
   errorsCount: number;
   nextHistoryId?: string;
   nextPageToken?: string | null;
+  historyPageToken?: string | null;
   initialSyncCompleted?: boolean;
   cursorUpdated: boolean;
   details: Array<{
@@ -423,6 +424,7 @@ export async function syncUserGmail(
   try {
     let messageIdsToProcess: string[] = [];
     let nextHistoryId: string | undefined;
+    let nextHistoryPageToken: string | null = null;
     let nextPageToken: string | null = null;
     let isInitialSyncDone = tokenRecord.initial_sync_completed ?? false;
 
@@ -432,21 +434,25 @@ export async function syncUserGmail(
       tokenRecord.initial_sync_completed;
 
     if (useHistory) {
-      // INCREMENTAL HISTORY SYNC (with full history pagination)
+      // INCREMENTAL HISTORY SYNC (with complete pagination & safe token resumption)
       try {
         result.syncType = "incremental_history";
         const collectedIds = new Set<string>();
-        let historyPageToken: string | undefined = undefined;
+        let currentHistoryToken: string | undefined =
+          tokenRecord.history_page_token || undefined;
+        let pagesCount = 0;
+        const maxPages = options.fetchAllPages ? (options.maxPages || 10) : 1;
 
         do {
           const historyRes: any = await gmail.users.history.list({
             userId: "me",
             startHistoryId: tokenRecord.history_id,
             historyTypes: ["messageAdded"],
-            pageToken: historyPageToken,
+            pageToken: currentHistoryToken,
             maxResults: options.maxResults || 50,
           });
 
+          pagesCount++;
           if (historyRes.data.historyId) {
             nextHistoryId = historyRes.data.historyId;
           }
@@ -462,16 +468,18 @@ export async function syncUserGmail(
             }
           }
 
-          historyPageToken = historyRes.data.nextPageToken || undefined;
-        } while (historyPageToken && options.fetchAllPages);
+          currentHistoryToken = historyRes.data.nextPageToken || undefined;
+        } while (currentHistoryToken && (options.fetchAllPages ? pagesCount < maxPages : false));
 
         messageIdsToProcess = Array.from(collectedIds);
+        nextHistoryPageToken = currentHistoryToken || null;
       } catch (historyErr: any) {
         console.warn(
           `History API sync failed (${historyErr.message}). Falling back to query sync.`
         );
         result.syncType = "fallback_full";
         messageIdsToProcess = [];
+        nextHistoryPageToken = null;
       }
     }
 
@@ -567,17 +575,23 @@ export async function syncUserGmail(
 
     // CURSOR SAFETY:
     // Only advance cursor if NO critical message errors occurred in this batch.
-    // Also, during initial sync, only save final history cursor when all pages are completed.
+    // In History API sync, never advance history_id if more history pages remain (nextHistoryPageToken != null).
     if (result.errorsCount === 0) {
       const updateData: Record<string, any> = {
         sync_status: "idle",
         last_synced_at: new Date().toISOString(),
         next_page_token: nextPageToken,
+        history_page_token: nextHistoryPageToken,
         initial_sync_completed: isInitialSyncDone,
       };
 
-      // Only advance history_id when initial sync is fully complete or during incremental sync
-      if (isInitialSyncDone) {
+      // Only advance history_id when all history pages have been processed!
+      const canAdvanceHistory =
+        result.syncType === "incremental_history"
+          ? nextHistoryPageToken === null // all history pages finished
+          : isInitialSyncDone && nextPageToken === null; // all initial query pages finished
+
+      if (canAdvanceHistory) {
         if (!nextHistoryId) {
           try {
             const profileRes = await gmail.users.getProfile({ userId: "me" });
@@ -588,6 +602,7 @@ export async function syncUserGmail(
         }
         if (nextHistoryId) {
           updateData.history_id = nextHistoryId;
+          updateData.history_page_token = null;
         }
       }
 
@@ -614,6 +629,7 @@ export async function syncUserGmail(
 
     result.nextHistoryId = nextHistoryId;
     result.nextPageToken = nextPageToken;
+    result.historyPageToken = nextHistoryPageToken;
     result.initialSyncCompleted = isInitialSyncDone;
     return result;
   } catch (syncError: any) {

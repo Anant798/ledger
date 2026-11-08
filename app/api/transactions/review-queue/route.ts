@@ -51,7 +51,7 @@ export async function GET() {
   }
 }
 
-// POST: Approve or reject an item in import_review_queue with atomic transaction
+// POST: Approve or reject an item in import_review_queue
 export async function POST(request: Request) {
   try {
     const supabase = await createClient();
@@ -78,7 +78,6 @@ export async function POST(request: Request) {
     const { reviewId, action, updates } = parsed.data;
 
     if (action === "reject") {
-      // Rejection updates review_status atomically
       const { data: updatedItem, error: updateErr } = await supabase
         .from("import_review_queue")
         .update({
@@ -88,7 +87,7 @@ export async function POST(request: Request) {
         })
         .eq("id", reviewId)
         .eq("user_id", user.id)
-        .eq("review_status", "pending") // ensures only pending item is rejected
+        .eq("review_status", "pending")
         .select()
         .maybeSingle();
 
@@ -115,7 +114,8 @@ export async function POST(request: Request) {
     }
 
     // Action === 'approve':
-    // Use atomic RPC function 'approve_review_queue_item'
+    // Must be executed atomically via the approve_review_queue_item SQL RPC.
+    // Non-atomic fallback removed to guarantee consistency and eliminate partial writes.
     const { data: rpcResult, error: rpcError } = await supabase.rpc(
       "approve_review_queue_item",
       {
@@ -130,121 +130,25 @@ export async function POST(request: Request) {
       }
     );
 
-    // If RPC is available, use its result directly
-    if (!rpcError && rpcResult) {
-      if (!rpcResult.success) {
-        return NextResponse.json(
-          { error: rpcResult.error, ...rpcResult },
-          { status: rpcResult.status || 400 }
-        );
-      }
-      return NextResponse.json(rpcResult);
-    }
-
-    // Fallback if RPC function is not yet migrated in database environment:
-    // Execute atomic claim query via conditional update (review_status = 'pending')
-    const { data: item, error: claimErr } = await supabase
-      .from("import_review_queue")
-      .select("*")
-      .eq("id", reviewId)
-      .eq("user_id", user.id)
-      .single();
-
-    if (claimErr || !item) {
-      return NextResponse.json({ error: "Review item not found" }, { status: 404 });
-    }
-
-    if (item.review_status !== "pending") {
+    if (rpcError) {
+      console.error("Atomic approval RPC error:", rpcError);
       return NextResponse.json(
         {
-          error: `Review item has already been ${item.review_status}.`,
-          reviewStatus: item.review_status,
-          transactionId: item.created_transaction_id || undefined,
+          error: "Atomic transaction approval is temporarily unavailable. Please run the required database migration for approve_review_queue_item.",
+          details: rpcError.message,
         },
-        { status: 409 }
+        { status: 503 }
       );
     }
 
-    const finalAmount = updates?.amount || item.amount;
-    const finalDirection = updates?.direction || item.direction;
-    const finalMerchant = updates?.merchant_name ?? item.merchant_name;
-    const finalBank = updates?.bank_name ?? item.bank_name;
-    const finalProvider = updates?.payment_provider ?? item.payment_provider;
-    const finalDescription = updates?.description ?? item.description;
-
-    const { data: newTxn, error: insertTxnErr } = await supabase
-      .from("transactions")
-      .insert({
-        user_id: user.id,
-        transaction_type: item.transaction_type || "payment",
-        direction: finalDirection,
-        amount: finalAmount,
-        currency_code: item.currency_code || "INR",
-        status: "completed",
-        description: finalDescription,
-        merchant_name: finalMerchant,
-        bank_name: finalBank,
-        payment_provider: finalProvider,
-        account_last4: item.account_last4,
-        external_reference: item.external_reference,
-        occurred_at: item.occurred_at,
-      })
-      .select()
-      .single();
-
-    if (insertTxnErr) throw insertTxnErr;
-
-    // Atomically mark approved
-    await supabase
-      .from("import_review_queue")
-      .update({
-        review_status: "approved",
-        resolved_at: new Date().toISOString(),
-        created_transaction_id: newTxn.id,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", reviewId)
-      .eq("user_id", user.id);
-
-    // Update processed_emails with created transaction_id
-    if (item.email_message_id) {
-      await supabase
-        .from("processed_emails")
-        .update({
-          status: "parsed",
-          transaction_id: newTxn.id,
-        })
-        .eq("user_id", user.id)
-        .eq("message_id", item.email_message_id);
+    if (!rpcResult || !rpcResult.success) {
+      return NextResponse.json(
+        { error: rpcResult?.error || "Failed to approve review item", ...rpcResult },
+        { status: rpcResult?.status || 400 }
+      );
     }
 
-    // Insert audit ledger event
-    await supabase.from("ledger_events").insert({
-      transaction_id: newTxn.id,
-      user_id: user.id,
-      event_type: "review_queue_approved",
-      event_source: "manual",
-      description: `Transaction approved from review queue item ${reviewId}`,
-      metadata: {
-        review_id: reviewId,
-        original_confidence: item.confidence,
-        corrections: updates || null,
-      },
-      occurred_at: new Date().toISOString(),
-    });
-
-    // Mark review alerts resolved
-    await supabase
-      .from("alerts")
-      .update({ is_resolved: true, resolved_at: new Date().toISOString() })
-      .eq("user_id", user.id)
-      .eq("alert_type", "transaction_review")
-      .ilike("message", `%${item.amount}%`);
-
-    return NextResponse.json({
-      message: "Transaction approved and confirmed",
-      transaction: newTxn,
-    });
+    return NextResponse.json(rpcResult);
   } catch (error: any) {
     console.error("Resolve review item error:", error);
     return NextResponse.json(
