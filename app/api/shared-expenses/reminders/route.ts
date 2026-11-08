@@ -1,0 +1,94 @@
+import { NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
+import { SharedExpensesService } from "@/lib/shared-expenses/service";
+import { reminderSettingSchema } from "@/lib/shared-expenses/validation";
+
+// GET: Fetch pending reminders for unsettled shares
+export async function GET() {
+  try {
+    const supabase = await createClient();
+
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser();
+
+    if (authError || !user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const pendingReminders = await SharedExpensesService.getPendingReminders(user.id);
+
+    // Also fetch user's reminder settings
+    const { data: settings } = await supabase
+      .from("reminder_settings")
+      .select("*")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    return NextResponse.json({
+      settings: settings || null,
+      pendingReminders,
+    });
+  } catch (error: any) {
+    console.error("Fetch pending reminders error:", error);
+    return NextResponse.json(
+      { error: error.message || "Failed to fetch reminders" },
+      { status: 500 }
+    );
+  }
+}
+
+// POST: Configure reminder settings (upserts in reminder_settings)
+export async function POST(request: Request) {
+  try {
+    const supabase = await createClient();
+
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser();
+
+    if (authError || !user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const body = await request.json();
+    const validation = reminderSettingSchema.safeParse(body);
+
+    if (!validation.success) {
+      return NextResponse.json(
+        { error: "Invalid reminder settings payload", details: validation.error.flatten() },
+        { status: 400 }
+      );
+    }
+
+    const { data: updated, error } = await supabase
+      .from("reminder_settings")
+      .upsert(
+        {
+          user_id: user.id,
+          ...validation.data,
+          updated_at: new Date().toISOString(),
+        },
+        {
+          onConflict: "user_id",
+        }
+      )
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    return NextResponse.json({
+      message: "Reminder settings updated successfully",
+      settings: updated,
+    });
+  } catch (error: any) {
+    console.error("Update reminder settings error:", error);
+    return NextResponse.json(
+      { error: error.message || "Failed to update reminder settings" },
+      { status: 500 }
+    );
+  }
+}

@@ -6,16 +6,21 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --experimental-strip-types -e \"import('./lib/email-parser/date.ts').then(m => { console.log('01-11-26 =>', m.normalizeTransactionDate('01-11-26, 21:24:36 IST')); console.log('31-02-2026 =>', m.normalizeTransactionDate('31-02-2026')); })\""
   },
   "dependencies": {
+    "@google/genai": "^2.32.0",
     "@supabase/ssr": "^0.12.7",
     "@supabase/supabase-js": "^2.118.0",
     "framer-motion": "^14.9.0",
+    "googleapis": "^189.0.0",
     "lucide-react": "^1.66.0",
     "next": "16.4.4",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "server-only": "^0.0.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
