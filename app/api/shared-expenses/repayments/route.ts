@@ -35,10 +35,10 @@ export async function POST(request: Request) {
       message: "Repayment recorded successfully",
       ...result,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Record repayment error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to record repayment" },
+      { error: error instanceof Error ? error.message : "Failed to record repayment" },
       { status: 500 }
     );
   }

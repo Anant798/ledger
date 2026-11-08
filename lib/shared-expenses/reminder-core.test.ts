@@ -31,6 +31,10 @@ const scheduled = nextReminderTime(new Date("2026-11-08T04:00:00.000Z"), {
   initial_message_enabled: true, frequency_hours: 24, preferred_send_time: "10:00:00", timezone: "Asia/Kolkata",
 }, 1);
 assert.equal(scheduled?.toISOString(), "2026-11-08T04:30:00.000Z");
+const followUp = nextReminderTime(new Date("2026-11-08T04:00:00.000Z"), {
+  initial_message_enabled: true, frequency_hours: 24, preferred_send_time: "10:00:00", timezone: "Asia/Kolkata",
+}, 2);
+assert.equal(followUp?.toISOString(), "2026-11-09T04:30:00.000Z");
 assert.equal(nextReminderTime(new Date(), {
   initial_message_enabled: false, frequency_hours: 24, preferred_send_time: "10:00:00", timezone: "Asia/Kolkata",
 }, 1), null);

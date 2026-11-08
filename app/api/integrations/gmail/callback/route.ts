@@ -3,6 +3,8 @@ import { getOAuth2Client } from "@/lib/gmail/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { encryptToken } from "@/lib/gmail/encryption";
 import { google } from "googleapis";
+import { verifyGmailOAuthState } from "@/lib/gmail/oauth-state";
+import { GMAIL_SCOPES } from "@/lib/gmail/client";
 
 export async function GET(request: Request) {
   try {
@@ -27,33 +29,47 @@ export async function GET(request: Request) {
 
     let parsedState: { userId: string };
     try {
-      parsedState = JSON.parse(
-        Buffer.from(state, "base64url").toString("utf-8")
-      );
+      const stateSecret = process.env.TOKEN_ENCRYPTION_KEY;
+      if (!stateSecret) throw new Error("Gmail token encryption is not configured.");
+      parsedState = verifyGmailOAuthState(state, stateSecret);
     } catch {
       return NextResponse.json({ error: "Invalid state parameter." }, { status: 400 });
     }
 
     const oauth2Client = getOAuth2Client();
     const { tokens } = await oauth2Client.getToken(code);
+    if (!tokens.access_token || !tokens.scope?.split(/\s+/).includes(GMAIL_SCOPES[0])) {
+      return NextResponse.json({ error: "Google did not grant Gmail read-only access." }, { status: 400 });
+    }
     oauth2Client.setCredentials(tokens);
 
-    // Fetch user profile email
-    const oauth2 = google.oauth2({ version: "v2", auth: oauth2Client });
-    const userInfo = await oauth2.userinfo.get();
-    const emailAddress = userInfo.data.email || null;
+    // Use the read-only Gmail profile endpoint; account sign-in OAuth is separate.
+    const gmail = google.gmail({ version: "v1", auth: oauth2Client });
+    const gmailProfile = await gmail.users.getProfile({ userId: "me" });
+    const emailAddress = gmailProfile.data.emailAddress || null;
+    if (!emailAddress) throw new Error("Google did not return the connected Gmail address.");
 
     const supabase = createAdminClient();
+    const { data: priorToken, error: priorTokenError } = await supabase
+      .from("server_oauth_tokens")
+      .select("refresh_token")
+      .eq("user_id", parsedState.userId)
+      .eq("provider", "gmail")
+      .maybeSingle();
+    if (priorTokenError) throw priorTokenError;
+    if (!tokens.refresh_token && !priorToken?.refresh_token) {
+      return NextResponse.json({ error: "Google did not return a refresh token. Revoke Ledger access in Google and reconnect." }, { status: 400 });
+    }
 
     const tokenExpiry = tokens.expiry_date
       ? new Date(tokens.expiry_date).toISOString()
       : null;
 
     // Encrypt sensitive access and refresh tokens before storing on server
-    const encryptedAccess = encryptToken(tokens.access_token!);
+    const encryptedAccess = encryptToken(tokens.access_token);
     const encryptedRefresh = tokens.refresh_token
       ? encryptToken(tokens.refresh_token)
-      : null;
+      : priorToken?.refresh_token || null;
 
     // 1. Store encrypted tokens in server_oauth_tokens (backend-only table, no client RLS)
     const { error: upsertError } = await supabase
@@ -83,34 +99,13 @@ export async function GET(request: Request) {
       );
     }
 
-    // 2. Also register in payment_sources WITHOUT exposing tokens (metadata only contains non-sensitive connection info)
-    await supabase.from("payment_sources").upsert(
-      {
-        user_id: parsedState.userId,
-        provider: "gmail",
-        provider_account_reference: emailAddress,
-        display_name: emailAddress ? `Gmail (${emailAddress})` : "Gmail Account",
-        connection_status: "connected",
-        consent_granted: true,
-        consent_granted_at: new Date().toISOString(),
-        connected_at: new Date().toISOString(),
-        metadata: {
-          email_address: emailAddress,
-          scopes: tokens.scope,
-        },
-      },
-      {
-        onConflict: "user_id,provider",
-      }
-    );
-
     return NextResponse.redirect(
       new URL("/dashboard?integration=gmail_connected", request.url)
     );
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Gmail OAuth Callback Exception:", err);
     return NextResponse.json(
-      { error: err.message || "Failed to process OAuth callback." },
+      { error: err instanceof Error ? err.message : "Failed to process OAuth callback." },
       { status: 500 }
     );
   }

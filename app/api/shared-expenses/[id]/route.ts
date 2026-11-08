@@ -27,10 +27,10 @@ export async function GET(request: Request, context: RouteParams) {
     }
 
     return NextResponse.json({ expense });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Get shared expense error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to fetch shared expense" },
+      { error: error instanceof Error ? error.message : "Failed to fetch shared expense" },
       { status: 500 }
     );
   }

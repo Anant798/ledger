@@ -44,10 +44,10 @@ export async function POST(request: Request) {
       message: "Sync completed successfully",
       result: syncResult,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Manual sync endpoint error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to synchronize Gmail" },
+      { error: error instanceof Error ? error.message : "Failed to synchronize Gmail" },
       { status: 500 }
     );
   }

@@ -41,10 +41,10 @@ export async function GET(request: Request) {
 
     const result = await TransactionService.list(user.id, parsedQuery.data);
     return NextResponse.json(result);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Transaction fetch error:", error);
     return NextResponse.json(
-      { error: error.message || "Unable to fetch transactions" },
+      { error: error instanceof Error ? error.message : "Unable to fetch transactions" },
       { status: 500 }
     );
   }
@@ -92,10 +92,10 @@ export async function POST(request: Request) {
       },
       { status: 201 }
     );
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Transaction creation error:", error);
     return NextResponse.json(
-      { error: error.message || "Unable to create transaction" },
+      { error: error instanceof Error ? error.message : "Unable to create transaction" },
       { status: 500 }
     );
   }

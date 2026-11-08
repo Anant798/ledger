@@ -4,24 +4,20 @@ import { GoogleGenAI } from "@google/genai";
 import {
   ParsedTransactionSchema,
   type ParsedTransaction,
-} from "./schema";
+} from "./schema.ts";
 
-import { normalizeEmailText } from "./normalizer";
+import { normalizeEmailText } from "./normalizer.ts";
 
-const apiKey = process.env.GEMINI_API_KEY;
-
-if (!apiKey) {
-  throw new Error("GEMINI_API_KEY is missing from environment variables.");
+function createAIClient() {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY is missing from environment variables.");
+  return new GoogleGenAI({ apiKey });
 }
-
-const ai = new GoogleGenAI({ apiKey });
 
 const MODEL = "gemini-3.6-flash";
 const MAX_ATTEMPTS = 3;
 
-type GeminiRequest = Parameters<
-  typeof ai.models.generateContent
->[0];
+type GeminiRequest = Parameters<GoogleGenAI["models"]["generateContent"]>[0];
 
 /**
  * Wait for a specified duration.
@@ -36,6 +32,7 @@ function delay(ms: number): Promise<void> {
 async function generateWithRetry(
   request: GeminiRequest
 ) {
+  const ai = createAIClient();
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
       return await ai.models.generateContent(request);

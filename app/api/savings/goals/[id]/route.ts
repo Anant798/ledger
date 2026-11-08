@@ -28,10 +28,10 @@ export async function GET(request: Request, context: RouteParams) {
     }
 
     return NextResponse.json({ goal });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Get savings goal error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to fetch savings goal" },
+      { error: error instanceof Error ? error.message : "Failed to fetch savings goal" },
       { status: 500 }
     );
   }
@@ -67,10 +67,10 @@ export async function PATCH(request: Request, context: RouteParams) {
       message: "Savings goal updated successfully",
       goal: updated,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Update savings goal error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to update savings goal" },
+      { error: error instanceof Error ? error.message : "Failed to update savings goal" },
       { status: 500 }
     );
   }

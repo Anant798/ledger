@@ -26,6 +26,11 @@ export default async function DashboardPage() {
         </p>
 
         <h1 className="mt-3 font-serif text-4xl">Ledger</h1>
+        <form action="/auth/signout" method="post" className="mt-4">
+          <button type="submit" className="text-sm text-[#715B37] underline underline-offset-4">
+            Sign out
+          </button>
+        </form>
       </header>
 
       <section className="mt-12">

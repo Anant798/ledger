@@ -1,6 +1,6 @@
 import assert from "node:assert";
-import { normalizeTransactionDate } from "./date";
-import { isLikelyTransactionEmail, buildGmailTransactionQuery } from "../gmail/bank-filters";
+import { normalizeTransactionDate } from "./date.ts";
+import { isLikelyTransactionEmail, buildGmailTransactionQuery } from "../gmail/bank-filters.ts";
 
 console.log("--- Starting Batch A Unit Tests ---");
 

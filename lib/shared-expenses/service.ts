@@ -109,44 +109,26 @@ export class SharedExpensesService {
     const amounts = calculateSplit(total_amount, split_method, participants.map((p) => p.amount_owed || 0));
     const computedShares = participants.map((p, index) => ({ ...p, amount_owed: amounts[index] }));
 
-    // 1. Insert into expense_groups (RLS: auth.uid() = user_id)
-    const { data: group, error: groupErr } = await supabase
-      .from("expense_groups")
-      .insert({
-        user_id: userId,
+    const { data, error } = await supabase.rpc("create_shared_expense_group", {
+      p_user_id: userId,
+      p_group: {
         transaction_id: transaction_id || null,
         title,
         total_amount,
         currency_code,
         split_method: toDatabaseSplitMethod(split_method),
-      })
-      .select()
-      .single();
-
-    if (groupErr) throw groupErr;
-
-    // 2. Insert into expense_shares (RLS: auth.uid() = user_id and group belongs to user)
-    const sharesToInsert = computedShares.map((p) => ({
-      expense_group_id: group.id,
-      user_id: userId,
-      participant_type: toDatabaseParticipantType(p.participant_type),
-      participant_name: p.participant_name,
-      email: p.email || null,
-      phone_number: p.phone_number || null,
-      amount_owed: p.amount_owed,
-    }));
-
-    const { data: insertedShares, error: sharesErr } = await supabase
-      .from("expense_shares")
-      .insert(sharesToInsert)
-      .select();
-
-    if (sharesErr) throw sharesErr;
-
-    return {
-      ...group,
-      shares: insertedShares,
-    };
+      },
+      p_shares: computedShares.map((participant) => ({
+        participant_type: toDatabaseParticipantType(participant.participant_type),
+        participant_name: participant.participant_name,
+        participant_user_id: participant.participant_type === "self" ? userId : participant.user_id || null,
+        email: participant.email || null,
+        phone_number: participant.phone_number || null,
+        amount_owed: participant.amount_owed,
+      })),
+    });
+    if (error) throw error;
+    return data;
   }
 
   /**

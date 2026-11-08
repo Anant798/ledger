@@ -37,10 +37,10 @@ export async function POST(request: Request) {
       message: "Gmail watch started successfully",
       watchResult,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Gmail watch setup error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to configure watch" },
+      { error: error instanceof Error ? error.message : "Failed to configure watch" },
       { status: 500 }
     );
   }

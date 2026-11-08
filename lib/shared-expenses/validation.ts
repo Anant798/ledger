@@ -17,12 +17,18 @@ export const createExpenseGroupSchema = z.object({
   transaction_id: z.string().uuid().optional().nullable(),
   participants: z.array(participantShareSchema).min(1),
 }).superRefine((data, ctx) => {
+  if (Math.round(data.total_amount * 100) < data.participants.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Each participant must receive at least one cent", path: ["participants"] });
+  }
   if (data.split_method === "custom") {
+    data.participants.forEach((participant, index) => {
+      if ((participant.amount_owed || 0) <= 0) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Each participant share must be positive", path: ["participants", index, "amount_owed"] });
+    });
     const sum = data.participants.reduce(
       (acc, p) => acc + (p.amount_owed || 0),
       0
     );
-    if (Math.abs(sum - data.total_amount) > 0.05) {
+    if (Math.abs(sum - data.total_amount) > 0.01) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `Sum of participant amounts (${sum.toFixed(2)}) must equal total amount (${data.total_amount.toFixed(2)})`,
@@ -31,6 +37,9 @@ export const createExpenseGroupSchema = z.object({
     }
   }
   if (data.split_method === "percentage") {
+    data.participants.forEach((participant, index) => {
+      if ((participant.amount_owed || 0) <= 0) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Each participant percentage must be positive", path: ["participants", index, "amount_owed"] });
+    });
     const sum = data.participants.reduce((acc, p) => acc + (p.amount_owed || 0), 0);
     if (Math.abs(sum - 100) > 0.01) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Participant percentages must total 100", path: ["participants"] });
   }

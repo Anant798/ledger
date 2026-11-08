@@ -2,7 +2,6 @@ import { google } from "googleapis";
 
 export const GMAIL_SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
-  "https://www.googleapis.com/auth/userinfo.email",
 ];
 
 export function getOAuth2Client() {
@@ -27,6 +26,7 @@ export function generateAuthUrl(state?: string): string {
   return oauth2Client.generateAuthUrl({
     access_type: "offline", // Essential to retrieve refresh_token
     prompt: "consent", // Force consent so refresh token is returned on re-auth
+    include_granted_scopes: true,
     scope: GMAIL_SCOPES,
     state,
   });

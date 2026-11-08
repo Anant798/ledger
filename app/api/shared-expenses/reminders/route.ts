@@ -88,6 +88,10 @@ export async function POST(request: Request) {
 
     if (error) throw error;
 
+    if (validation.data.enabled) {
+      const { error: rescheduleError } = await supabase.rpc("reschedule_expense_reminders", { p_user_id: user.id });
+      if (rescheduleError) throw rescheduleError;
+    }
     const { error: scheduleError } = validation.data.enabled
       ? await supabase.rpc("schedule_expense_reminders", { p_user_id: user.id })
       : await supabase.rpc("cancel_user_expense_reminders", { p_user_id: user.id });

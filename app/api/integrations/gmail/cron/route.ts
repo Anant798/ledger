@@ -9,7 +9,7 @@ export async function POST(request: Request) {
   try {
     const authHeader = request.headers.get("authorization");
 
-    if (CRON_SECRET && authHeader !== `Bearer ${CRON_SECRET}`) {
+    if (!CRON_SECRET || authHeader !== `Bearer ${CRON_SECRET}`) {
       return NextResponse.json({ error: "Unauthorized cron trigger" }, { status: 401 });
     }
 
@@ -17,12 +17,14 @@ export async function POST(request: Request) {
 
     // 1. Identify integrations that need synchronization (not synced in the last 30 minutes)
     const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const now = Date.now();
+    const twentyFourHoursFromNow = new Date(now + 24 * 60 * 60 * 1000).toISOString();
 
     const { data: integrations, error } = await supabase
       .from("server_oauth_tokens")
       .select("user_id, last_synced_at, watch_expiration")
       .eq("provider", "gmail")
-      .or(`last_synced_at.is.null,last_synced_at.lt.${thirtyMinutesAgo}`)
+      .or(`last_synced_at.is.null,last_synced_at.lt.${thirtyMinutesAgo},watch_expiration.is.null,watch_expiration.lt.${twentyFourHoursFromNow}`)
       .limit(10);
 
     if (error) throw error;
@@ -30,16 +32,13 @@ export async function POST(request: Request) {
     const syncResults = [];
     const watchRenewals = [];
 
-    const now = Date.now();
-    const twentyFourHoursFromNow = new Date(now + 24 * 60 * 60 * 1000).toISOString();
-
     for (const item of integrations || []) {
       // Execute incremental or query sync
       try {
         const res = await syncUserGmail(item.user_id, { maxResults: 15 });
         syncResults.push({ userId: item.user_id, status: "success", res });
-      } catch (err: any) {
-        syncResults.push({ userId: item.user_id, status: "error", error: err.message });
+      } catch (err: unknown) {
+        syncResults.push({ userId: item.user_id, status: "error", error: err instanceof Error ? err.message : "Gmail sync failed" });
       }
 
       // Check if Gmail Pub/Sub watch is expiring within 24 hours (or expired) and renew it automatically
@@ -56,11 +55,11 @@ export async function POST(request: Request) {
               status: "renewed",
               expiration: watchRes.expiration,
             });
-          } catch (wErr: any) {
+          } catch (wErr: unknown) {
             watchRenewals.push({
               userId: item.user_id,
               status: "renewal_failed",
-              error: wErr.message,
+              error: wErr instanceof Error ? wErr.message : "Gmail watch renewal failed",
             });
           }
         }
@@ -72,10 +71,10 @@ export async function POST(request: Request) {
       syncResults,
       watchRenewals,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Cron sync error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed scheduled sync" },
+      { error: error instanceof Error ? error.message : "Failed scheduled sync" },
       { status: 500 }
     );
   }

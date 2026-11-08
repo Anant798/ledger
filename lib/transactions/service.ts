@@ -89,42 +89,16 @@ export class TransactionService {
    */
   static async create(userId: string, input: CreateTransactionInput) {
     const supabase = await createClient();
-
-    const { data: txn, error } = await supabase
-      .from("transactions")
-      .insert({
-        user_id: userId,
-        transaction_type: input.transaction_type,
-        direction: input.direction,
-        amount: input.amount,
-        currency_code: input.currency_code,
-        status: input.status,
-        description: input.description,
-        merchant_name: input.merchant_name,
-        bank_name: input.bank_name,
+    const { data, error } = await supabase.rpc("create_manual_transaction_with_event", {
+      p_user_id: userId,
+      p_transaction: {
+        ...input,
         payment_provider: input.payment_provider || "manual",
-        account_last4: input.account_last4,
-        external_reference: input.external_reference,
-        related_transaction_id: input.related_transaction_id,
         occurred_at: input.occurred_at || new Date().toISOString(),
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    // Log to ledger_events
-    await supabase.from("ledger_events").insert({
-      transaction_id: txn.id,
-      user_id: userId,
-      event_type: "transaction_created",
-      event_source: "manual",
-      description: `Manual transaction of ${txn.amount} ${txn.currency_code} created`,
-      metadata: { input },
-      occurred_at: txn.occurred_at,
+      },
     });
-
-    return txn;
+    if (error) throw error;
+    return data;
   }
 
   /**
@@ -133,31 +107,13 @@ export class TransactionService {
   static async update(userId: string, id: string, input: UpdateTransactionInput) {
     const supabase = await createClient();
 
-    const { data: updated, error } = await supabase
-      .from("transactions")
-      .update({
-        ...input,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", id)
-      .eq("user_id", userId)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    // Log update event
-    await supabase.from("ledger_events").insert({
-      transaction_id: id,
-      user_id: userId,
-      event_type: "transaction_updated",
-      event_source: "manual",
-      description: `Transaction ${id} updated`,
-      metadata: { updates: input },
-      occurred_at: new Date().toISOString(),
+    const { data, error } = await supabase.rpc("update_manual_transaction_with_event", {
+      p_user_id: userId,
+      p_transaction_id: id,
+      p_updates: input,
     });
-
-    return updated;
+    if (error) throw error;
+    return data;
   }
 
   /**

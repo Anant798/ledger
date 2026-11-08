@@ -19,10 +19,10 @@ export async function GET() {
 
     const expenses = await SharedExpensesService.list(user.id);
     return NextResponse.json({ expenses });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("List shared expenses error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to fetch shared expenses" },
+      { error: error instanceof Error ? error.message : "Failed to fetch shared expenses" },
       { status: 500 }
     );
   }
@@ -61,10 +61,10 @@ export async function POST(request: Request) {
       },
       { status: 201 }
     );
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Create shared expense error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to create shared expense" },
+      { error: error instanceof Error ? error.message : "Failed to create shared expense" },
       { status: 500 }
     );
   }

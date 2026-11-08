@@ -13,7 +13,6 @@ const resolveReviewSchema = z.object({
       amount: z.number().positive().optional(),
       direction: z.enum(["debit", "credit"]).optional(),
       description: z.string().optional(),
-      category: z.string().optional(),
     })
     .optional(),
 });
@@ -42,10 +41,10 @@ export async function GET() {
     if (error) throw error;
 
     return NextResponse.json({ reviewQueue: data || [] });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Fetch review queue error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to fetch review queue" },
+      { error: error instanceof Error ? error.message : "Failed to fetch review queue" },
       { status: 500 }
     );
   }
@@ -78,38 +77,16 @@ export async function POST(request: Request) {
     const { reviewId, action, updates } = parsed.data;
 
     if (action === "reject") {
-      const { data: updatedItem, error: updateErr } = await supabase
-        .from("import_review_queue")
-        .update({
-          review_status: "rejected",
-          resolved_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", reviewId)
-        .eq("user_id", user.id)
-        .eq("review_status", "pending")
-        .select()
-        .maybeSingle();
-
-      if (updateErr) throw updateErr;
-
-      if (!updatedItem) {
-        return NextResponse.json(
-          { error: "Review item not found or already processed" },
-          { status: 409 }
-        );
-      }
-
-      await supabase
-        .from("alerts")
-        .update({ is_resolved: true, resolved_at: new Date().toISOString() })
-        .eq("user_id", user.id)
-        .eq("alert_type", "transaction_review")
-        .ilike("message", `%${updatedItem.amount}%`);
+      const { data: result, error: rejectError } = await supabase.rpc("reject_review_queue_item", {
+        p_user_id: user.id,
+        p_review_id: reviewId,
+      });
+      if (rejectError) return NextResponse.json({ error: "Atomic review rejection is unavailable. Apply the pending Batch A migration.", details: rejectError.message }, { status: 503 });
+      if (!result?.success) return NextResponse.json({ error: result?.error || "Review item not found or already processed" }, { status: result?.status || 409 });
 
       return NextResponse.json({
         message: "Import item rejected",
-        item: updatedItem,
+        item: result,
       });
     }
 
@@ -149,10 +126,10 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json(rpcResult);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Resolve review item error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to resolve review item" },
+      { error: error instanceof Error ? error.message : "Failed to resolve review item" },
       { status: 500 }
     );
   }

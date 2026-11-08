@@ -22,6 +22,7 @@ export const addContributionSchema = z.object({
   amount: z.number().positive().finite(),
   notes: z.string().max(500).optional().nullable(),
   contributed_at: z.string().datetime({ offset: true }).optional(),
+  transaction_id: z.string().uuid().optional(),
 });
 
 export type CreateSavingsGoalInput = z.infer<typeof createSavingsGoalSchema>;

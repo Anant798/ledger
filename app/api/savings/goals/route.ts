@@ -19,10 +19,10 @@ export async function GET() {
 
     const goals = await SavingsService.list(user.id);
     return NextResponse.json({ goals });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("List savings goals error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to list savings goals" },
+      { error: error instanceof Error ? error.message : "Failed to list savings goals" },
       { status: 500 }
     );
   }
@@ -61,10 +61,10 @@ export async function POST(request: Request) {
       },
       { status: 201 }
     );
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Create savings goal error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to create savings goal" },
+      { error: error instanceof Error ? error.message : "Failed to create savings goal" },
       { status: 500 }
     );
   }

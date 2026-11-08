@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { generateAuthUrl } from "@/lib/gmail/client";
+import { createGmailOAuthState } from "@/lib/gmail/oauth-state";
 
 export async function GET() {
   try {
@@ -15,15 +16,16 @@ export async function GET() {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // State carries user id securely to match on callback
-    const state = Buffer.from(JSON.stringify({ userId: user.id })).toString("base64url");
+    const stateSecret = process.env.TOKEN_ENCRYPTION_KEY;
+    if (!stateSecret) throw new Error("Gmail token encryption is not configured.");
+    const state = createGmailOAuthState(user.id, stateSecret);
     const authUrl = generateAuthUrl(state);
 
     return NextResponse.json({ authUrl });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Gmail OAuth Init Error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to initialize Gmail OAuth" },
+      { error: error instanceof Error ? error.message : "Failed to initialize Gmail OAuth" },
       { status: 500 }
     );
   }

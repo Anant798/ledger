@@ -38,10 +38,10 @@ export async function POST(request: Request) {
       },
       { status: 201 }
     );
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Add contribution error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to add contribution" },
+      { error: error instanceof Error ? error.message : "Failed to add contribution" },
       { status: 500 }
     );
   }

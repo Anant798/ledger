@@ -28,10 +28,10 @@ export async function GET(request: Request, context: RouteParams) {
     }
 
     return NextResponse.json({ transaction });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Get transaction error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to fetch transaction" },
+      { error: error instanceof Error ? error.message : "Failed to fetch transaction" },
       { status: 500 }
     );
   }
@@ -78,10 +78,10 @@ export async function PATCH(request: Request, context: RouteParams) {
       message: "Transaction updated successfully",
       transaction,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Update transaction error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to update transaction" },
+      { error: error instanceof Error ? error.message : "Failed to update transaction" },
       { status: 500 }
     );
   }
@@ -106,10 +106,10 @@ export async function DELETE(request: Request, context: RouteParams) {
     return NextResponse.json({
       message: "Transaction deleted successfully",
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Delete transaction error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to delete transaction" },
+      { error: error instanceof Error ? error.message : "Failed to delete transaction" },
       { status: 500 }
     );
   }

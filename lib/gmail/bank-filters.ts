@@ -96,6 +96,14 @@ export function buildGmailTransactionQuery(afterTimestampSeconds?: number): stri
 export function isLikelyTransactionEmail(from: string, subject: string, bodyText: string): boolean {
   const combined = `${from} ${subject} ${bodyText}`.toLowerCase();
 
+  const senderAddress = from.match(/<([^>]+)>/)?.[1] || from.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || "";
+  const senderDomain = senderAddress.split("@")[1]?.toLowerCase();
+  const trustedSender = !!senderDomain && INDIAN_BANK_SENDERS.some((sender) => {
+    const allowedDomain = sender.includes("@") ? sender.split("@")[1] : sender;
+    return senderDomain === allowedDomain || senderDomain.endsWith(`.${allowedDomain}`);
+  });
+  if (!trustedSender) return false;
+
   // Check if it's an obvious OTP or promotional email
   for (const nonTxn of NON_TRANSACTION_INDICATORS) {
     // If it mentions OTP or verification code specifically in subject or short text

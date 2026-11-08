@@ -134,6 +134,18 @@ export class SavingsService {
   static async addManualContribution(userId: string, input: AddContributionInput) {
     const supabase = await createClient();
 
+    if (input.transaction_id) {
+      const { data, error } = await supabase.rpc("add_transaction_goal_contribution", {
+        p_user_id: userId,
+        p_goal_id: input.goal_id,
+        p_transaction_id: input.transaction_id,
+        p_amount: input.amount,
+        p_notes: input.notes || null,
+      });
+      if (error) throw error;
+      return data;
+    }
+
     const { data, error } = await supabase
       .from("goal_contributions")
       .insert({
