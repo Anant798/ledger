@@ -9,6 +9,7 @@ import {
 } from "./validation";
 import { calculateExpenseGroupBalance, calculateShareBalance, calculateSplit } from "./calculations";
 import { resolveOwnerId } from "./integration-helpers";
+import { accessibleExpenseGroupFilter } from "./participant-access";
 type ShareRow = { id: string; amount_owed: number | string; participant_type?: string; is_active?: boolean | null; repayments?: Array<{ amount: number | string | null; payment_status: string }>; totalRepaid?: number; outstandingBalance?: number; isSettled?: boolean; [key: string]: unknown };
 type RepaymentRow = { amount: number | string | null; payment_status: string };
 
@@ -18,6 +19,12 @@ export class SharedExpensesService {
    */
   static async list(userId: string, archived = false) {
     const supabase = await createClient();
+    const { data: participantShares, error: participantError } = await supabase
+      .from("expense_shares")
+      .select("expense_group_id")
+      .eq("participant_user_id", userId);
+    if (participantError) throw participantError;
+    const groupFilter = accessibleExpenseGroupFilter(userId, (participantShares || []).map((share) => share.expense_group_id));
 
     const { data: groups, error } = await supabase
       .from("expense_groups")
@@ -28,7 +35,7 @@ export class SharedExpensesService {
           repayments(*, events:repayment_events(*))
         )
       `)
-      .eq("user_id", userId)
+      .or(groupFilter)
       .order("created_at", { ascending: false });
 
     if (error) throw error;
@@ -43,6 +50,12 @@ export class SharedExpensesService {
    */
   static async getById(userId: string, groupId: string) {
     const supabase = await createClient();
+    const { data: participantShares, error: participantError } = await supabase
+      .from("expense_shares")
+      .select("expense_group_id")
+      .eq("participant_user_id", userId);
+    if (participantError) throw participantError;
+    const groupFilter = accessibleExpenseGroupFilter(userId, (participantShares || []).map((share) => share.expense_group_id));
 
     const { data: group, error } = await supabase
       .from("expense_groups")
@@ -54,7 +67,7 @@ export class SharedExpensesService {
         )
       `)
       .eq("id", groupId)
-      .eq("user_id", userId)
+      .or(groupFilter)
       .maybeSingle();
 
     if (error) throw error;

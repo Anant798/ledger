@@ -1,6 +1,5 @@
--- Additive Gmail ingestion and review-queue support. Review before applying.
--- Supabase inspection showed no Batch A tables and no recorded migrations on
--- the connected project; this file creates the missing objects only.
+-- Additive Gmail ingestion and review-queue support. This migration assumes
+-- the project's existing Ledger base tables and preserves their current data.
 
 ALTER TABLE public.transactions ADD COLUMN IF NOT EXISTS bank_name text;
 ALTER TABLE public.transactions ADD COLUMN IF NOT EXISTS account_last4 text;
@@ -403,8 +402,19 @@ CREATE INDEX idx_repayment_events_user_batch_a ON public.repayment_events(user_i
 CREATE INDEX idx_repayments_reversed_by_batch_a ON public.repayments(reversed_by);
 CREATE INDEX idx_transactions_related_batch_a ON public.transactions(related_transaction_id);
 CREATE INDEX idx_transactions_user_batch_a ON public.transactions(user_id);
-CREATE UNIQUE INDEX uq_webhook_events_provider_id
-  ON public.webhook_events(provider,provider_event_id);
+-- webhook_events already has a unique constraint on this exact key in the
+-- inspected project. Reuse that key for ON CONFLICT instead of adding a second
+-- equivalent unique index. Abort on a drifted base schema rather than guessing.
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname='public' AND tablename='webhook_events'
+      AND indexdef ILIKE '%(provider, provider_event_id)%'
+      AND indexdef ILIKE 'CREATE UNIQUE INDEX%'
+  ) THEN
+    RAISE EXCEPTION 'Expected existing unique webhook_events(provider, provider_event_id) key; inspect the live definition before applying';
+  END IF;
+END $$;
 ALTER TABLE public.webhook_events ADD COLUMN IF NOT EXISTS processing_started_at timestamptz;
 ALTER TABLE public.server_oauth_tokens ADD COLUMN IF NOT EXISTS sync_lease_until timestamptz;
 REVOKE ALL ON public.webhook_events FROM PUBLIC, anon, authenticated;

@@ -24,7 +24,8 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conrelid='public.repayment_events'::regclass
       AND conname=v_constraint
-      AND pg_get_constraintdef(oid) ILIKE '%created%confirmed%reversed%'
+      AND regexp_replace(replace(lower(pg_get_constraintdef(oid)), '::text', ''), '[[:space:]''()\[\]]', '', 'g') =
+        'checkevent_type=anyarraycreated,confirmed,reversed'
   ) THEN
     RAISE EXCEPTION 'Unexpected repayment event constraint definition; inspect before applying';
   END IF;

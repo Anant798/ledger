@@ -12,10 +12,13 @@ const repayments = await readFile(join(directory, "20261108000300_repayments_set
 const savings = await readFile(join(directory, "20261108000400_savings_goals_module.sql"), "utf8");
 const transactions = await readFile(join(directory, "20261108000500_transaction_management.sql"), "utf8");
 const gmailCompletion = await readFile(join(directory, "20261108000600_gmail_bank_alert_completion.sql"), "utf8");
-const allSql = `${batchA}\n${batchB}\n${expenseGroups}\n${repayments}\n${savings}\n${transactions}\n${gmailCompletion}`;
+const profilePreferences = await readFile(join(directory, "20261109000000_user_profile_preferences.sql"), "utf8");
+const securityHardening = await readFile(join(directory, "20261110000000_existing_security_hardening.sql"), "utf8");
+const sharedExpenseParticipants = await readFile(join(directory, "20261111000000_shared_expense_participant_read_access.sql"), "utf8");
+const allSql = `${batchA}\n${batchB}\n${expenseGroups}\n${repayments}\n${savings}\n${transactions}\n${gmailCompletion}\n${profilePreferences}\n${securityHardening}\n${sharedExpenseParticipants}`;
 
 test("migration versions are unique and ordered", () => {
-  const versions = ["20261108000000", "20261108000100", "20261108000200", "20261108000300", "20261108000400", "20261108000500", "20261108000600"];
+  const versions = ["20261108000000", "20261108000100", "20261108000200", "20261108000300", "20261108000400", "20261108000500", "20261108000600", "20261109000000", "20261110000000", "20261111000000"];
   assert.equal(new Set(versions).size, versions.length);
   assert.deepEqual([...versions].sort(), versions);
 });
@@ -26,6 +29,8 @@ test("backend-only credential and webhook tables revoke inherited PUBLIC access"
   assert.match(batchA, /REVOKE ALL ON public\.webhook_events FROM PUBLIC, anon, authenticated;/i);
   assert.match(batchB, /REVOKE ALL ON public\.reminder_attempts FROM PUBLIC, anon, authenticated;/i);
   assert.match(batchB, /GRANT ALL ON public\.reminder_attempts TO service_role;/i);
+  assert.doesNotMatch(batchA, /CREATE UNIQUE INDEX uq_webhook_events_provider_id/i);
+  assert.match(batchA, /Expected existing unique webhook_events\(provider, provider_event_id\) key/i);
   assert.match(batchB, /Users can view own reminder attempts[\s\S]*?FOR SELECT TO authenticated USING \(\(SELECT auth\.uid\(\)\) = user_id\)/i);
 });
 
@@ -153,4 +158,21 @@ test("Gmail review migration retains incomplete alerts and resolves them through
   assert.match(gmailCompletion, /GRANT EXECUTE ON FUNCTION public\.resolve_gmail_import_review\(uuid,uuid,text,jsonb\) TO authenticated, service_role/i);
   assert.match(gmailCompletion, /INSERT INTO public\.transactions[\s\S]*?occurred_at,category/i);
   assert.match(gmailCompletion, /INSERT INTO public\.ledger_events/i);
+});
+
+test("legacy trigger-only definer functions retain triggers but lose direct client RPC grants", () => {
+  assert.match(securityHardening, /handle_new_user[\s\S]*auth\.users/i);
+  assert.match(securityHardening, /log_repayment_event[\s\S]*public\.repayments/i);
+  assert.match(securityHardening, /REVOKE EXECUTE ON FUNCTION public\.handle_new_user\(\) FROM PUBLIC, anon, authenticated/i);
+  assert.match(securityHardening, /REVOKE EXECUTE ON FUNCTION public\.log_repayment_event\(\) FROM PUBLIC, anon, authenticated/i);
+});
+
+test("linked expense participants receive read access without mutation access", () => {
+  assert.match(sharedExpenseParticipants, /auth\.uid\(\) IS NOT NULL[\s\S]*auth\.uid\(\)=p_user_id/);
+  assert.match(sharedExpenseParticipants, /Participants can view shared expense groups[\s\S]*FOR SELECT TO authenticated/i);
+  assert.match(sharedExpenseParticipants, /Participants can view shares in shared expense groups[\s\S]*FOR SELECT TO authenticated/i);
+  assert.match(sharedExpenseParticipants, /Participants can view shared expense repayments[\s\S]*FOR SELECT TO authenticated/i);
+  assert.match(sharedExpenseParticipants, /Participants can view shared repayment events[\s\S]*FOR SELECT TO authenticated/i);
+  assert.doesNotMatch(sharedExpenseParticipants, /FOR (?:INSERT|UPDATE|DELETE|ALL) TO authenticated/i);
+  assert.match(sharedExpenseParticipants, /REVOKE ALL ON FUNCTION public\.is_expense_group_participant\(uuid,uuid\) FROM PUBLIC, anon/i);
 });

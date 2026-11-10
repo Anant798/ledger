@@ -28,7 +28,15 @@ SELECT provider, provider_event_id, count(*) AS row_count, array_agg(id ORDER BY
 FROM public.webhook_events
 GROUP BY provider, provider_event_id HAVING count(*) > 1;
 -- Rows returned: inspect processing state/payloads and reconcile manually before
--- creating uq_webhook_events_provider_id.
+-- Before applying, verify the existing unique key can support ON CONFLICT; the
+-- migration reuses it and deliberately avoids a redundant second unique index.
+SELECT indexname,indexdef FROM pg_indexes
+WHERE schemaname='public' AND tablename='webhook_events'
+  AND indexdef ILIKE 'CREATE UNIQUE INDEX%'
+ORDER BY indexname;
+-- The result must contain a unique index/constraint on exactly
+-- (provider, provider_event_id). If absent or defined on different columns,
+-- stop and reconcile after reviewing existing event rows.
 
 -- 3. UUID-shaped duplicate repayment idempotency references.
 SELECT user_id, expense_share_id, external_reference, count(*) AS row_count,
