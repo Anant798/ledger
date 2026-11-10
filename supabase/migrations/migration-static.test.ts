@@ -18,7 +18,7 @@ const sharedExpenseParticipants = await readFile(join(directory, "20261111000000
 const allSql = `${batchA}\n${batchB}\n${expenseGroups}\n${repayments}\n${savings}\n${transactions}\n${gmailCompletion}\n${profilePreferences}\n${securityHardening}\n${sharedExpenseParticipants}`;
 
 test("migration versions are unique and ordered", () => {
-  const versions = ["20261108000000", "20261108000100", "20261108000200", "20261108000300", "20261108000400", "20261108000500", "20261108000600", "20261109000000", "20261110000000", "20261111000000"];
+  const versions = ["20261107000000", "20261108000000", "20261108000100", "20261108000200", "20261108000300", "20261108000400", "20261108000500", "20261108000600", "20261109000000", "20261110000000", "20261111000000"];
   assert.equal(new Set(versions).size, versions.length);
   assert.deepEqual([...versions].sort(), versions);
 });

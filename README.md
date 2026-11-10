@@ -16,6 +16,10 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+## Local Supabase
+
+Install and start Docker Desktop, then run `npm run supabase:local:start` and `npm run supabase:local:status`. For stop, local migration, health-check, and the current base-schema prerequisite, see [docs/local-supabase.md](docs/local-supabase.md).
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.

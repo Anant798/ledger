@@ -72,7 +72,7 @@ SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
   v_group public.expense_groups;
-  v_share jsonb;
+  v_share_json jsonb;
   v_item jsonb;
   v_share_id uuid;
   v_share public.expense_shares;

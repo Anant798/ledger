@@ -7,6 +7,13 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "supabase:version": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/supabase-local.ps1 version",
+    "supabase:local:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/supabase-local.ps1 start",
+    "supabase:local:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/supabase-local.ps1 status",
+    "supabase:local:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/supabase-local.ps1 stop",
+    "supabase:local:reset": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/supabase-local.ps1 reset",
+    "supabase:local:migration-list": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/supabase-local.ps1 migration-list",
+    "supabase:local:types": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/supabase-local.ps1 types",
     "test": "node --experimental-strip-types --test lib/gmail/service.test.ts lib/gmail/classification.test.ts lib/gmail/encryption.test.ts lib/shared-expenses/reminder-worker.test.ts lib/shared-expenses/expense-groups.test.ts lib/shared-expenses/participant-access.test.ts lib/savings/calculations.test.ts lib/transactions/validation.test.ts supabase/migrations/migration-static.test.ts && node --experimental-strip-types lib/email-parser/batch-a.test.ts && node --experimental-strip-types lib/shared-expenses/reminder-core.test.ts && node --experimental-strip-types lib/shared-expenses/batch-b-calculations.test.ts"
   },
   "dependencies": {
@@ -29,6 +36,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.4",
+    "supabase": "^3.1.0",
     "tailwindcss": "^4",
     "typescript": "^5"
   }
