@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useLanguage } from "@/components/language-provider";
+import { formatLedgerDateTime } from "@/lib/date-format";
 
 type Notification = { id: string; title: string; message: string; alert_type: string; is_read: boolean; created_at: string };
 
@@ -53,7 +54,7 @@ export default function NotificationCenter() {
         {items.length === 0 ? <p className="py-5 text-center text-sm text-[#817766]">{text("No notifications yet.", "अभी कोई सूचना नहीं है।")}</p> : items.map((item) => <button key={item.id} type="button" onClick={() => { if (!item.is_read) void markRead(item.id); }} className={`block w-full py-3 text-left ${item.is_read ? "opacity-70" : ""}`}>
           <span className="flex items-center justify-between gap-2"><span className="text-sm font-medium text-[#51452F]">{item.title}</span>{!item.is_read && <span className="h-2 w-2 rounded-full bg-[#805F22]" />}</span>
           <span className="mt-1 block text-xs leading-relaxed text-[#756C5D]">{item.message}</span>
-          <span className="mt-1 block text-[10px] text-[#968A76]">{new Date(item.created_at).toLocaleString()}</span>
+          <span className="mt-1 block text-[10px] text-[#968A76]">{formatLedgerDateTime(item.created_at)}</span>
         </button>)}
       </div>
     </div>}
