@@ -58,10 +58,18 @@ async function generateWithGroqFallback(request: GeminiRequest) {
     signal: AbortSignal.timeout(30000),
   });
 
-  const payload = await response.json() as {
+  const responseText = await response.text();
+  let payload: {
     choices?: Array<{ message?: { content?: string | null } }>;
     error?: { message?: string };
   };
+
+  try {
+    payload = JSON.parse(responseText) as typeof payload;
+  } catch {
+    const detail = responseText.trim().slice(0, 300) || "Empty provider response";
+    throw new Error(`Groq fallback returned a non-JSON response (${response.status}): ${detail}`);
+  }
 
   if (!response.ok) {
     throw new Error(`Groq fallback failed (${response.status}): ${payload.error?.message || "Unknown provider error"}`);
