@@ -81,8 +81,16 @@ export default function GmailBankAlerts() {
     setBusy(full ? "full-sync" : "sync"); setError(""); setMessage("");
     try {
       const response = await fetch("/api/integrations/gmail/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ forceFullSync: full, fetchAllPages: true, maxResults: 50 }) });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error || "Gmail sync failed");
+      const responseText = await response.text();
+      let body: { error?: string; result?: { importedCount: number; reviewQueuedCount: number; ignoredCount: number; errorsCount: number } };
+      try {
+        body = JSON.parse(responseText) as typeof body;
+      } catch {
+        const detail = responseText.trim().slice(0, 240) || "Empty response";
+        throw new Error(`Gmail sync returned a non-JSON response (HTTP ${response.status}): ${detail}`);
+      }
+      if (!response.ok) throw new Error(body.error || `Gmail sync failed (HTTP ${response.status})`);
+      if (!body.result) throw new Error("Gmail sync response did not include a result.");
       const result = body.result;
       setMessage(`Sync finished: ${result.importedCount} imported, ${result.reviewQueuedCount} to review, ${result.ignoredCount} ignored, ${result.errorsCount} errors.`);
       window.dispatchEvent(new Event("ledger:transactions-updated"));
