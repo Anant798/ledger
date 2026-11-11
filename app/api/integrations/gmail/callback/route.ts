@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getOAuth2Client } from "@/lib/gmail/client";
+import { getOAuth2Client, getGmailTokenEncryptionKey, GmailOAuthConfigurationError } from "@/lib/gmail/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { encryptToken } from "@/lib/gmail/encryption";
 import { google } from "googleapis";
@@ -29,14 +29,16 @@ export async function GET(request: Request) {
 
     let parsedState: { userId: string };
     try {
-      const stateSecret = process.env.TOKEN_ENCRYPTION_KEY;
-      if (!stateSecret) throw new Error("Gmail token encryption is not configured.");
+      const stateSecret = getGmailTokenEncryptionKey();
       parsedState = verifyGmailOAuthState(state, stateSecret);
-    } catch {
+    } catch (error) {
+      if (error instanceof GmailOAuthConfigurationError) {
+        return NextResponse.json({ error: error.message, code: error.code }, { status: 503 });
+      }
       return NextResponse.json({ error: "Invalid state parameter." }, { status: 400 });
     }
 
-    const oauth2Client = getOAuth2Client();
+    const oauth2Client = getOAuth2Client(new URL(request.url).origin);
     const { tokens } = await oauth2Client.getToken(code);
     if (!tokens.access_token || !hasReadOnlyGmailScope(tokens.scope)) {
       return NextResponse.json({ error: "Google did not grant Gmail read-only access." }, { status: 400 });
@@ -103,6 +105,10 @@ export async function GET(request: Request) {
       new URL("/dashboard?integration=gmail_connected", request.url)
     );
   } catch (err: unknown) {
+    if (err instanceof GmailOAuthConfigurationError) {
+      console.error("Gmail OAuth callback configuration error:", err.code);
+      return NextResponse.json({ error: err.message, code: err.code }, { status: 503 });
+    }
     console.error("Gmail OAuth callback failed:", err instanceof Error ? err.name : "unknown error");
     return NextResponse.json(
       { error: "Failed to process Gmail authorization." },

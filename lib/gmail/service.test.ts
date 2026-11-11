@@ -117,7 +117,7 @@ test("likely bank alerts with incomplete extraction are kept in review instead o
   assert.equal(review.amount, null);
   assert.equal(review.direction, null);
   assert.match(String(review.uncertain_reason), /amount is missing/);
-  assert.match(String(review.uncertain_reason), /transaction date\/time needs confirmation/);
+  assert.match(String(review.uncertain_reason), /transaction date could not be read from the bank email/);
 });
 
 test("date-only and received-at timestamps are queued for confirmation", async () => {

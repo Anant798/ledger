@@ -8,9 +8,21 @@ import {
 
 import { normalizeEmailText } from "./normalizer.ts";
 
+export class GeminiConfigurationError extends Error {
+  readonly code = "GEMINI_API_KEY_MISSING";
+  constructor() {
+    super("GEMINI_API_KEY is missing. Add it to the local .env.local file and restart the Next.js server.");
+    this.name = "GeminiConfigurationError";
+  }
+}
+
+export function assertGeminiConfigured(): void {
+  if (!process.env.GEMINI_API_KEY?.trim()) throw new GeminiConfigurationError();
+}
+
 function createAIClient() {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY is missing from environment variables.");
+  if (!apiKey?.trim()) throw new GeminiConfigurationError();
   return new GoogleGenAI({ apiKey });
 }
 

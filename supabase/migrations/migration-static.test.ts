@@ -15,10 +15,12 @@ const gmailCompletion = await readFile(join(directory, "20261108000600_gmail_ban
 const profilePreferences = await readFile(join(directory, "20261109000000_user_profile_preferences.sql"), "utf8");
 const securityHardening = await readFile(join(directory, "20261110000000_existing_security_hardening.sql"), "utf8");
 const sharedExpenseParticipants = await readFile(join(directory, "20261111000000_shared_expense_participant_read_access.sql"), "utf8");
-const allSql = `${batchA}\n${batchB}\n${expenseGroups}\n${repayments}\n${savings}\n${transactions}\n${gmailCompletion}\n${profilePreferences}\n${securityHardening}\n${sharedExpenseParticipants}`;
+const gmailTimeProvenance = await readFile(join(directory, "20261111102420_gmail_transaction_time_provenance.sql"), "utf8");
+const gmailCategoryPreservation = await readFile(join(directory, "20261111103911_gmail_import_category_preservation.sql"), "utf8");
+const allSql = `${batchA}\n${batchB}\n${expenseGroups}\n${repayments}\n${savings}\n${transactions}\n${gmailCompletion}\n${profilePreferences}\n${securityHardening}\n${sharedExpenseParticipants}\n${gmailTimeProvenance}\n${gmailCategoryPreservation}`;
 
 test("migration versions are unique and ordered", () => {
-  const versions = ["20261107000000", "20261108000000", "20261108000100", "20261108000200", "20261108000300", "20261108000400", "20261108000500", "20261108000600", "20261109000000", "20261110000000", "20261111000000"];
+  const versions = ["20261107000000", "20261108000000", "20261108000100", "20261108000200", "20261108000300", "20261108000400", "20261108000500", "20261108000600", "20261109000000", "20261110000000", "20261111000000", "20261111102420", "20261111103911"];
   assert.equal(new Set(versions).size, versions.length);
   assert.deepEqual([...versions].sort(), versions);
 });
@@ -66,6 +68,12 @@ test("Gmail approval dedupe is scoped by user, provider and reference", () => {
   const approval = batchA.slice(batchA.indexOf("CREATE FUNCTION public.approve_review_queue_item"), batchA.indexOf("CREATE FUNCTION public.reject_review_queue_item"));
   assert.match(approval, /user_id=p_user_id[\s\S]*payment_provider=COALESCE\(p_payment_provider, v_review\.payment_provider\)[\s\S]*external_reference=v_review\.external_reference/);
   assert.match(approval, /ON CONFLICT \(user_id,payment_provider,external_reference\)/);
+});
+
+test("Gmail provenance import preserves transaction category", () => {
+  assert.match(gmailTimeProvenance, /occurred_at_source,category\)[\s\S]*?NULLIF\(p_transaction->>'category',''\)/i);
+  assert.match(gmailCategoryPreservation, /occurred_at_source,category\)[\s\S]*?NULLIF\(p_transaction->>'category',''\)/i);
+  assert.match(gmailCategoryPreservation, /REVOKE ALL ON FUNCTION public\.complete_gmail_import\(uuid,text,jsonb,jsonb\)/i);
 });
 
 test("all definer functions pin search_path and include an explicit revoke", () => {

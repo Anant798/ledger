@@ -75,6 +75,25 @@ export const transactionQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
+// Keep in sync with the Gmail review editor, which submits all correction fields.
+export const resolveReviewSchema = z.object({
+  reviewId: z.string().uuid(),
+  action: z.enum(["approve", "reject"]),
+  updates: z.object({
+    merchant_name: z.string().optional(),
+    bank_name: z.string().optional(),
+    payment_provider: z.string().optional(),
+    amount: z.number().positive().finite().optional(),
+    direction: directionEnum.optional(),
+    currency_code: z.string().regex(/^[A-Za-z]{3}$/).optional(),
+    transaction_type: transactionTypeEnum.optional(),
+    category: z.string().max(100).optional(),
+    occurred_at: z.string().datetime({ offset: true }).optional(),
+    description: z.string().optional(),
+    external_reference: z.string().max(100).nullable().optional(),
+  }).strict().optional(),
+}).strict();
+
 export type CreateTransactionInput = z.infer<typeof createTransactionSchema>;
 export type UpdateTransactionInput = z.infer<typeof updateTransactionSchema>;
 export type TransactionQueryParams = z.infer<typeof transactionQuerySchema>;

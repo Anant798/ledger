@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { syncUserGmail } from "@/lib/gmail/service";
+import { GeminiConfigurationError } from "@/lib/email-parser/gemini";
 
 export async function POST(request: Request) {
   try {
@@ -45,6 +46,10 @@ export async function POST(request: Request) {
       result: syncResult,
     });
   } catch (error: unknown) {
+    if (error instanceof GeminiConfigurationError) {
+      console.error("Manual Gmail sync configuration error: GEMINI_API_KEY_MISSING");
+      return NextResponse.json({ error: error.message, code: error.code }, { status: 503 });
+    }
     console.error("Manual Gmail sync failed:", error instanceof Error ? error.name : "unknown error");
     return NextResponse.json(
       { error: "Failed to synchronize Gmail." },

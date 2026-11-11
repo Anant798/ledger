@@ -1,25 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { z } from "zod";
-
-const resolveReviewSchema = z.object({
-  reviewId: z.string().uuid(),
-  action: z.enum(["approve", "reject"]),
-  updates: z
-    .object({
-      merchant_name: z.string().optional(),
-      bank_name: z.string().optional(),
-      payment_provider: z.string().optional(),
-      amount: z.number().positive().optional(),
-      direction: z.enum(["debit", "credit"]).optional(),
-      currency_code: z.string().regex(/^[A-Za-z]{3}$/).optional(),
-      transaction_type: z.enum(["payment", "refund", "reversal", "shared_expense", "repayment", "manual", "other"]).optional(),
-      category: z.string().max(100).optional(),
-      occurred_at: z.string().datetime().optional(),
-      description: z.string().optional(),
-    }).strict()
-    .optional(),
-});
+import { resolveReviewSchema } from "@/lib/transactions/validation";
 
 // GET: Fetch pending import review items
 export async function GET() {

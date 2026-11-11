@@ -6,8 +6,12 @@ import {
   buildGmailTransactionQuery,
   isLikelyTransactionEmail,
 } from "./bank-filters.ts";
-import { extractTransactionFromEmail } from "../email-parser/gemini.ts";
+import { assertGeminiConfigured, extractTransactionFromEmail } from "../email-parser/gemini.ts";
+import { normalizeEmailText, prepareEmailForExtraction } from "../email-parser/normalizer.ts";
+import { isGmailQuotaError, withGmailQuotaRetry } from "./retry.ts";
+import { extractPreferredMimeBody } from "./mime.ts";
 import { normalizeTransactionDate } from "../email-parser/date.ts";
+import { extractBankDateTime } from "../email-parser/bank-datetime.ts";
 import { classifyBankTransaction } from "./classification.ts";
 
 async function createAdminClient() {
@@ -98,31 +102,6 @@ export async function getFreshGmailClient(userId: string) {
   return { gmail, tokenRecord, oauth2Client };
 }
 
-type GmailBodyPayload = { body?: { data?: string | null } | null; parts?: GmailBodyPayload[] | null; mimeType?: string | null };
-
-function extractBodyFromPayload(payload: GmailBodyPayload | null | undefined): string {
-  if (!payload) return "";
-  let body = "";
-
-  if (payload.body && payload.body.data) {
-    body += Buffer.from(payload.body.data, "base64").toString("utf-8");
-  }
-
-  if (payload.parts && Array.isArray(payload.parts)) {
-    for (const part of payload.parts) {
-      if (part.mimeType === "text/plain" && part.body && part.body.data) {
-        body += Buffer.from(part.body.data, "base64").toString("utf-8");
-      } else if (part.mimeType === "text/html" && part.body && part.body.data) {
-        body += Buffer.from(part.body.data, "base64").toString("utf-8");
-      } else if (part.parts) {
-        body += extractBodyFromPayload(part);
-      }
-    }
-  }
-
-  return body;
-}
-
 /**
  * Process a single Gmail message.
  * Message claiming and final writes are performed through atomic service-only RPCs.
@@ -151,11 +130,9 @@ export async function processGmailMessage(
     };
   }
 
-  const messageRes = await gmail.users.messages.get({
-    userId: "me",
-    id: messageId,
-    format: "full",
-  });
+  const messageRes = await withGmailQuotaRetry(() => gmail.users.messages.get({
+    userId: "me", id: messageId, format: "full",
+  }));
 
   const msg = messageRes.data;
   const headers = msg.payload?.headers || [];
@@ -163,10 +140,13 @@ export async function processGmailMessage(
   const subjectHeader = headers.find((h) => h.name?.toLowerCase() === "subject")?.value || "";
   const dateHeader = headers.find((h) => h.name?.toLowerCase() === "date")?.value || "";
 
-  const emailBody = extractBodyFromPayload(msg.payload);
-  const internalDate = msg.internalDate
-    ? new Date(Number(msg.internalDate)).toISOString()
-    : new Date().toISOString();
+  const emailBody = normalizeEmailText(extractPreferredMimeBody(msg.payload));
+  const gmailReceivedAt = msg.internalDate && Number.isFinite(Number(msg.internalDate)) ? new Date(Number(msg.internalDate)) : null;
+  const headerReceivedAt = !gmailReceivedAt && dateHeader ? new Date(dateHeader) : null;
+  const receivedAt = gmailReceivedAt && !Number.isNaN(gmailReceivedAt.getTime())
+    ? gmailReceivedAt
+    : headerReceivedAt && !Number.isNaN(headerReceivedAt.getTime()) ? headerReceivedAt : null;
+  const internalDate = receivedAt?.toISOString() ?? null;
 
   const { error: messageUpdateError } = await supabase.from("processed_emails").update({
     history_id: msg.historyId || null, internal_date: internalDate, sender: fromHeader, subject: subjectHeader,
@@ -189,9 +169,31 @@ export async function processGmailMessage(
   }
 
   // 2. AI Parsing with Gemini
-  const parsed = await extractor(
-    `Subject: ${subjectHeader}\nFrom: ${fromHeader}\nDate: ${dateHeader}\n\n${emailBody}`
+  const preparedEmail = prepareEmailForExtraction(
+    `Subject: ${subjectHeader}\nFrom: ${fromHeader}\nDate: ${dateHeader}\n\n${emailBody}`,
   );
+  const bodyDateTime = extractBankDateTime(emailBody, {
+    internalDate: gmailReceivedAt && !Number.isNaN(gmailReceivedAt.getTime()) ? String(gmailReceivedAt.getTime()) : null,
+    dateHeader,
+    timeZone: process.env.LEDGER_TIME_ZONE || "Asia/Kolkata",
+  });
+  if (preparedEmail.oversized) {
+    const { data: reviewId, error } = await supabase.rpc("complete_gmail_review", {
+      p_user_id: userId,
+      p_message_id: messageId,
+      p_review: {
+        direction: null, amount: null, currency_code: null, transaction_type: "other", category: null,
+        description: "Gmail alert requires manual review", merchant_name: null, bank_name: null,
+        payment_provider: null, account_last4: null, external_reference: null, upi_id: null,
+        confidence: 0, uncertain_reason: "Email content remains too large to extract safely after removing quoted content.",
+        raw_snippet: normalizeEmailText(emailBody).slice(0, 300), occurred_at: bodyDateTime?.occurredAt ?? null,
+        occurred_at_source: bodyDateTime?.occurredAtSource ?? null,
+      },
+    });
+    if (error) throw error;
+    return { messageId, status: "needs_review" as const, reason: "Email too large for safe extraction", reviewId: String(reviewId) };
+  }
+  const parsed = await extractor(preparedEmail.text);
 
   const bankName = parsed.bankName?.trim() || null;
   // payment_provider is the identity namespace used with external_reference
@@ -199,7 +201,9 @@ export async function processGmailMessage(
   // (UPI/NEFT/etc. can be shared by unrelated banks).
   const paymentProvider = bankName?.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || null;
   const externalReference = parsed.referenceNumber?.trim() || null;
-  const normalizedDate = normalizeTransactionDate(parsed.transactionDate);
+  const modelDate = parsed.transactionDateSource === "email" ? normalizeTransactionDate(parsed.transactionDate) : null;
+  const occurredAt = bodyDateTime?.occurredAt ?? (modelDate?.precision === "datetime" ? modelDate.value : null);
+  const occurredAtSource = bodyDateTime?.occurredAtSource ?? (occurredAt ? "bank_provided" as const : null);
 
   const isUncertain =
     parsed.confidence < 0.75 ||
@@ -211,18 +215,10 @@ export async function processGmailMessage(
     !parsed.bankName ||
     !externalReference ||
     !parsed.merchantOrSender?.trim() ||
-    parsed.transactionDateSource !== "email" ||
-    !parsed.transactionDate ||
-    normalizedDate.precision !== "datetime" ||
-    !normalizedDate.value;
+    !occurredAt ||
+    !occurredAtSource;
   const transactionType = parsed.transactionType;
   const category = classifyBankTransaction({ merchant: parsed.merchantOrSender, description: subjectHeader, direction: parsed.direction });
-
-  const occurredAt = normalizedDate.value
-    ? (normalizedDate.precision === "date"
-        ? `${normalizedDate.value}T12:00:00+05:30`
-        : normalizedDate.value)
-    : internalDate;
 
   // 3. Handle Uncertain:
   // Step 1: Insert processed_emails record first (so foreign key in import_review_queue is valid)
@@ -254,12 +250,14 @@ export async function processGmailMessage(
           !bankName && "bank is missing",
           !externalReference && "reference number is missing",
           !parsed.merchantOrSender?.trim() && "merchant or sender is missing",
-          (parsed.transactionDateSource !== "email" || !parsed.transactionDate || normalizedDate.precision !== "datetime" || !normalizedDate.value) && "transaction date/time needs confirmation",
+          !occurredAt && "transaction date could not be read from the bank email",
+          occurredAtSource === "email_received_fallback" && "time uses email receipt and is not bank-confirmed",
           parsed.status !== "completed" && `status is ${parsed.status}`,
           parsed.confidence < 0.75 && `low extraction confidence (${parsed.confidence})`,
         ].filter(Boolean).join("; "),
         raw_snippet: emailBody.slice(0, 300),
         occurred_at: occurredAt,
+        occurred_at_source: occurredAtSource,
       },
     });
 
@@ -269,7 +267,7 @@ export async function processGmailMessage(
       messageId,
       status: "needs_review" as const,
       reviewId,
-      reason: `Needs confirmation: ${[!parsed.amount && "amount", !parsed.direction && "direction", !parsed.currency && "currency", !bankName && "bank", !externalReference && "reference", !parsed.merchantOrSender?.trim() && "merchant", (parsed.transactionDateSource !== "email" || !parsed.transactionDate || normalizedDate.precision !== "datetime" || !normalizedDate.value) && "date/time", parsed.status !== "completed" && "status", parsed.confidence < 0.75 && "confidence"].filter(Boolean).join(", ") || "transaction classification"}`,
+      reason: `Needs confirmation: ${[!parsed.amount && "amount", !parsed.direction && "direction", !parsed.currency && "currency", !bankName && "bank", !externalReference && "reference", !parsed.merchantOrSender?.trim() && "merchant", !occurredAt && "transaction date/time", parsed.status !== "completed" && "status", parsed.confidence < 0.75 && "confidence"].filter(Boolean).join(", ") || "transaction classification"}`,
     };
   }
 
@@ -291,6 +289,7 @@ export async function processGmailMessage(
       account_last4: parsed.accountLast4,
       external_reference: externalReference,
       occurred_at: occurredAt,
+      occurred_at_source: occurredAtSource,
     },
     p_metadata: {
       confidence: parsed.confidence,
@@ -320,6 +319,7 @@ export async function syncUserGmail(
     maxPages?: number;
   } = {}
 ): Promise<SyncResult> {
+  assertGeminiConfigured();
   const supabase = await createAdminClient();
   const { gmail, tokenRecord } = await getFreshGmailClient(userId);
 
@@ -365,13 +365,13 @@ export async function syncUserGmail(
         const maxPages = options.fetchAllPages ? (options.maxPages || 10) : 1;
 
         do {
-          const historyRes = await gmail.users.history.list({
+          const historyRes = await withGmailQuotaRetry(() => gmail.users.history.list({
             userId: "me",
             startHistoryId: tokenRecord.history_id,
             historyTypes: ["messageAdded"],
             pageToken: currentHistoryToken,
             maxResults: options.maxResults || 50,
-          });
+          }));
 
           pagesCount++;
           if (historyRes.data.historyId) {
@@ -395,6 +395,7 @@ export async function syncUserGmail(
         messageIdsToProcess = Array.from(collectedIds);
         nextHistoryPageToken = currentHistoryToken || null;
       } catch (historyErr: unknown) {
+        if (isGmailQuotaError(historyErr)) throw historyErr;
         console.warn(
           `History API sync failed (${historyErr instanceof Error ? historyErr.message : "unknown error"}). Falling back to query sync.`
         );
@@ -478,7 +479,7 @@ export async function syncUserGmail(
         else if (itemResult.status === "needs_review") result.reviewQueuedCount++;
         else if (itemResult.status === "ignored") result.ignoredCount++;
       } catch (err: unknown) {
-        console.error(`Error processing message ${msgId}:`, err);
+        console.error(`Error processing Gmail message ${msgId}:`, err instanceof Error ? err.message : "Unknown processing failure");
         result.errorsCount++;
         result.details.push({
           messageId: msgId,
@@ -491,6 +492,7 @@ export async function syncUserGmail(
           p_reason: err instanceof Error ? err.message : "Processing exception",
         });
         if (markFailedError) console.error("Failed to record Gmail message failure:", markFailedError.message);
+        if (isGmailQuotaError(err)) break;
       }
     }
 
