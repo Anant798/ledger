@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useLanguage } from "@/components/language-provider";
+import { formatLedgerDateTime } from "@/lib/date-format";
 
 type Review = {
   id: string; amount: number | null; direction: "debit" | "credit" | null;
@@ -137,7 +138,7 @@ export default function GmailBankAlerts() {
     <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-xs tracking-[0.25em] text-[#897653]">{text("BANK EMAILS", "बैंक के ईमेल")}</p><h2 className="mt-2 font-serif text-3xl">{text("Bank email alerts", "बैंक के ईमेल अलर्ट")}</h2><p className="mt-1 text-sm text-[#756C5D]">{text("Connect Gmail to find bank alerts. You can check and edit each record.", "बैंक के अलर्ट देखने के लिए Gmail जोड़ें। आप हर रिकॉर्ड जाँच और बदल सकते हैं।")}</p></div>
       {!connected ? <button disabled={Boolean(busy)} onClick={() => void connect()} className="rounded bg-[#715B37] px-4 py-2 text-sm text-white">{text("Connect Gmail", "Gmail जोड़ें")}</button> : <div className="flex flex-wrap gap-2"><button disabled={Boolean(busy)} onClick={() => void sync()} className="rounded bg-[#715B37] px-4 py-2 text-sm text-white">{busy === "sync" ? text("Checking…", "देख रहे हैं…") : text("Check now", "अभी देखें")}</button><button disabled={Boolean(busy)} onClick={() => void sync(true)} className="rounded border border-[#C9BDA6] px-3 py-2 text-sm">{text("Check all again", "सभी फिर से देखें")}</button><button disabled={Boolean(busy)} onClick={() => void disconnect()} className="px-3 py-2 text-sm text-red-700 underline">{text("Disconnect Gmail", "Gmail हटाएँ")}</button></div>}
     </div>
-    {connected && connection && <p className="mt-3 text-xs text-[#756C5D]">Connected as {connection.emailAddress || "Gmail account"} · Sync: {connection.syncStatus}{connection.lastSyncedAt ? ` · Last synced ${new Date(connection.lastSyncedAt).toLocaleString()}` : connection.initialSyncCompleted ? "" : " · Initial sync pending"}</p>}
+    {connected && connection && <p className="mt-3 text-xs text-[#756C5D]">Connected as {connection.emailAddress || "Gmail account"} · Sync: {connection.syncStatus}{connection.lastSyncedAt ? ` · Last synced ${formatLedgerDateTime(connection.lastSyncedAt)}` : connection.initialSyncCompleted ? "" : " · Initial sync pending"}</p>}
     {connection?.lastError && <p className="mt-2 text-sm text-amber-800">Last sync issue: {connection.lastError}</p>}
     {message && <p role="status" className="mt-3 text-sm text-green-800">{message}</p>}{error && <p role="alert" className="mt-3 text-sm text-red-700">{error}</p>}
     {reviews.length > 0 && <div className="mt-6 space-y-4"><h3 className="font-serif text-2xl">Needs review ({reviews.length})</h3>{reviews.map((row) => {
