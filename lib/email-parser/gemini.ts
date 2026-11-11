@@ -9,21 +9,76 @@ import {
 import { normalizeEmailText } from "./normalizer.ts";
 
 export class GeminiConfigurationError extends Error {
-  readonly code = "GEMINI_API_KEY_MISSING";
+  readonly code = "AI_PARSER_API_KEY_MISSING";
   constructor() {
-    super("GEMINI_API_KEY is missing. Add it to the local .env.local file and restart the Next.js server.");
+    super("No AI extraction provider is configured. Add GEMINI_API_KEY or GROQ_API_KEY to the Vercel Production environment.");
     this.name = "GeminiConfigurationError";
   }
 }
 
 export function assertGeminiConfigured(): void {
-  if (!process.env.GEMINI_API_KEY?.trim()) throw new GeminiConfigurationError();
+  if (!process.env.GEMINI_API_KEY?.trim() && !process.env.GROQ_API_KEY?.trim()) {
+    throw new GeminiConfigurationError();
+  }
 }
 
 function createAIClient() {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey?.trim()) throw new GeminiConfigurationError();
   return new GoogleGenAI({ apiKey });
+}
+
+type GroqMessage = { role: string; content: string };
+
+async function generateWithGroqFallback(request: GeminiRequest) {
+  const apiKey = process.env.GROQ_API_KEY?.trim();
+  if (!apiKey) throw new Error("Gemini quota was exhausted and GROQ_API_KEY is not configured.");
+
+  const contents = request.contents as unknown as Array<{
+    role?: string;
+    parts?: Array<{ text?: string }>;
+  }>;
+  const messages: GroqMessage[] = contents.map((item) => ({
+    role: item.role === "model" ? "assistant" : "user",
+    content: (item.parts || []).map((part) => part.text || "").join("\\n"),
+  }));
+
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: process.env.GROQ_MODEL?.trim() || "openai/gpt-oss-20b",
+      messages,
+      response_format: { type: "json_object" },
+      temperature: 0.1,
+    }),
+    signal: AbortSignal.timeout(30000),
+  });
+
+  const responseText = await response.text();
+  let payload: {
+    choices?: Array<{ message?: { content?: string | null } }>;
+    error?: { message?: string };
+  };
+
+  try {
+    payload = JSON.parse(responseText) as typeof payload;
+  } catch {
+    const detail = responseText.trim().slice(0, 300) || "Empty provider response";
+    throw new Error(`Groq fallback returned a non-JSON response (${response.status}): ${detail}`);
+  }
+
+  if (!response.ok) {
+    throw new Error(`Groq fallback failed (${response.status}): ${payload.error?.message || "Unknown provider error"}`);
+  }
+
+  const text = payload.choices?.[0]?.message?.content;
+  if (!text) throw new Error("Groq fallback returned an empty response.");
+  console.warn("Gemini unavailable or rate-limited; transaction extraction completed with Groq fallback.");
+  return { text };
 }
 
 const MODEL = "gemini-3.6-flash";
@@ -44,13 +99,16 @@ function delay(ms: number): Promise<void> {
 async function generateWithRetry(
   request: GeminiRequest
 ) {
+  if (!process.env.GEMINI_API_KEY?.trim()) {
+    return generateWithGroqFallback(request);
+  }
+
   const ai = createAIClient();
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
       return await ai.models.generateContent(request);
     } catch (error) {
       const message = String(error);
-
       const retryable =
         message.includes("503") ||
         message.includes("UNAVAILABLE") ||
@@ -59,18 +117,17 @@ async function generateWithRetry(
         message.includes("500") ||
         message.includes("INTERNAL");
 
-      if (!retryable || attempt === MAX_ATTEMPTS - 1) {
+      if (!retryable) throw error;
+      if (attempt === MAX_ATTEMPTS - 1) {
+        if (process.env.GROQ_API_KEY?.trim()) {
+          console.warn("Gemini retries exhausted; switching to Groq fallback.");
+          return generateWithGroqFallback(request);
+        }
         throw error;
       }
 
       const waitTime = 1000 * 2 ** attempt;
-
-      console.warn(
-        `Gemini request failed. Retrying in ${waitTime}ms. Attempt ${
-          attempt + 1
-        }/${MAX_ATTEMPTS}.`
-      );
-
+      console.warn(`Gemini request failed. Retrying in ${waitTime}ms. Attempt ${attempt + 1}/${MAX_ATTEMPTS}.`);
       await delay(waitTime);
     }
   }

@@ -34,7 +34,7 @@ type ExpenseGroup = {
   isFullySettled: boolean;
 }
 
-type Transaction = { id: string; description?: string | null; merchant_name?: string | null; amount: number | string; currency_code: string; occurred_at: string };
+type Transaction = { id: string; description?: string | null; merchant_name?: string | null; amount: number | string; currency_code: string; occurred_at: string; direction?: "debit" | "credit"; status?: string };
 type DraftParticipant = { id?: string; name: string; type: "self" | "external"; email: string; phone: string; amount: string };
 type ExpenseForm = { title: string; total: string; currency: string; split: "equal" | "custom" | "percentage"; transactionId: string; participants: DraftParticipant[] };
 
@@ -65,6 +65,7 @@ export default function ExpenseGroups() {
   const [repayingShare, setRepayingShare] = useState<string | null>(null);
   const [repaymentAmount, setRepaymentAmount] = useState("");
   const repaymentKeys = useRef<Record<string, string>>({});
+  const prefillHandled = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -76,10 +77,40 @@ export default function ExpenseGroups() {
       ]);
       const groupBody = await groupResponse.json();
       if (!groupResponse.ok) throw new Error(groupBody.error || "Could not load shared expenses");
-      setGroups(groupBody.expenses || []);
+      const loadedGroups = groupBody.expenses || [];
+      setGroups(loadedGroups);
       if (transactionResponse.ok) {
         const transactionBody = await transactionResponse.json();
         setTransactions(transactionBody.transactions || []);
+      }
+
+      // A debit can open this page with ?transactionId=... to start a linked expense group.
+      if (!prefillHandled.current && typeof window !== "undefined") {
+        const requestedTransactionId = new URLSearchParams(window.location.search).get("transactionId");
+        if (requestedTransactionId) {
+          prefillHandled.current = true;
+          const detailResponse = await fetch(`/api/transactions/${encodeURIComponent(requestedTransactionId)}`, { cache: "no-store" });
+          const detailBody = await detailResponse.json();
+          if (!detailResponse.ok) throw new Error(detailBody.error || "Could not load the selected transaction");
+          const selected = detailBody.transaction as Transaction;
+          if (selected.direction !== "debit" || selected.status !== "completed") {
+            throw new Error("Only completed debit transactions can be converted into expense groups.");
+          }
+          if (loadedGroups.some((group: ExpenseGroup) => group.transaction_id === selected.id)) {
+            throw new Error("This debit is already linked to an expense group.");
+          }
+          setForm({
+            title: selected.merchant_name || selected.description || "Shared expense",
+            total: String(selected.amount),
+            currency: selected.currency_code || "INR",
+            split: "equal",
+            transactionId: selected.id,
+            participants: [blankParticipant()],
+          });
+          setEditingId(null);
+          setEditingLocked(false);
+          setFormOpen(true);
+        }
       }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not load shared expenses");
