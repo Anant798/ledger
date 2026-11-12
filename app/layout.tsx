@@ -4,6 +4,11 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Ledger — Personal Financial Journal",
   description: "A clear, considered record of your financial life.",
+  icons: {
+    icon: "https://raw.githubusercontent.com/Anant798/ledger/master/Ledger%20Icon.png",
+    shortcut: "https://raw.githubusercontent.com/Anant798/ledger/master/Ledger%20Icon.png",
+    apple: "https://raw.githubusercontent.com/Anant798/ledger/master/Ledger%20Icon.png",
+  },
 };
 
 export default function RootLayout({
