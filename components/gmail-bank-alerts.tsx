@@ -81,7 +81,7 @@ export default function GmailBankAlerts() {
   async function sync(full = false) {
     setBusy(full ? "full-sync" : "sync"); setError(""); setMessage("");
     try {
-      const response = await fetch("/api/integrations/gmail/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ forceFullSync: full, fetchAllPages: true, maxResults: 50 }) });
+      const response = await fetch("/api/integrations/gmail/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ forceFullSync: full, fetchAllPages: false, maxResults: 3 }) });
       const responseText = await response.text();
       let body: { error?: string; result?: { importedCount: number; reviewQueuedCount: number; ignoredCount: number; errorsCount: number } };
       try {
