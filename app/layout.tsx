@@ -5,9 +5,9 @@ export const metadata: Metadata = {
   title: "Chronexa — Personal Finance",
   description: "A clear, considered record of your financial life.",
   icons: {
-    icon: "https://raw.githubusercontent.com/Anant798/ledger/master/Ledger%20Icon.png",
-    shortcut: "https://raw.githubusercontent.com/Anant798/ledger/master/Ledger%20Icon.png",
-    apple: "https://raw.githubusercontent.com/Anant798/ledger/master/Ledger%20Icon.png",
+    icon: [{ url: "/icon.png", type: "image/png" }],
+    shortcut: ["/icon.png"],
+    apple: [{ url: "/icon.png", type: "image/png" }],
   },
 };
 
