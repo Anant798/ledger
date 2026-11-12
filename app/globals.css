@@ -1,3 +1,91 @@
+@import "tailwindcss";
+
+:root {
+  --paper: #f1ecdf;
+  --paper-light: #faf7ef;
+  --paper-deep: #e8dfce;
+  --ink: #302b22;
+  --ink-soft: #756c5d;
+  --ink-faint: #897653;
+  --rule: #c9bda6;
+  --gold: #806b45;
+  --gold-pale: #e9dfc9;
+  --font-sans: Arial, Helvetica, sans-serif;
+}
+
+@theme inline {
+  --color-background: var(--paper);
+  --color-foreground: var(--ink);
+  --font-sans: Arial, Helvetica, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 1.5rem; }
+body {
+  min-height: 100%;
+  color: var(--ink);
+  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--paper);
+  background-image: radial-gradient(ellipse at 14% 9%, rgb(179 147 96 / 9%), transparent 34%), radial-gradient(ellipse at 89% 31%, rgb(134 117 80 / 7%), transparent 31%), radial-gradient(ellipse at 45% 95%, rgb(201 177 133 / 9%), transparent 35%), repeating-linear-gradient(0deg, transparent 0 31px, rgb(107 89 60 / 3%) 32px, transparent 33px);
+  background-attachment: fixed;
+}
+
+h1, h2, h3, h4 { font-family: Georgia, "Times New Roman", serif; font-weight: 500; letter-spacing: -0.025em; }
+button, a, input, select, textarea, summary { -webkit-tap-highlight-color: transparent; }
+button, a { transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease; }
+button:not(:disabled) { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+input, select, textarea { color: var(--ink); }
+input::placeholder, textarea::placeholder { color: #918777; }
+:focus-visible { outline: 2px solid #806b45; outline-offset: 2px; }
+::selection { color: #302b22; background: #dfd1b3; }
+
+main { position: relative; isolation: isolate; }
+main > header { max-width: 76rem; margin-inline: auto; }
+main > section { max-width: 76rem; margin-inline: auto; }
+main > section:not(:first-of-type) { scroll-margin-top: 1.5rem; }
+main > section.rounded-xl,
+main > section.mx-auto { border-radius: 3px; box-shadow: 0 5px 20px rgb(63 51 33 / 5%); }
+
+/* Reusable notebook surfaces across forms, records, alerts and shared expenses. */
+main section.rounded-xl, main section > .rounded-xl { border-radius: 3px; }
+main section article, main section [role="dialog"] { box-shadow: 0 2px 8px rgb(63 51 33 / 4%); }
+main section input, main section select, main section textarea,
+main form input, main form select, main form textarea {
+  border-radius: 2px;
+  background-color: #fffdf8;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+main section input:focus, main section select:focus, main section textarea:focus,
+main form input:focus, main form select:focus, main form textarea:focus {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgb(128 107 69 / 12%);
+  outline: none;
+}
+main section button:not(:disabled):hover, main > header button:not(:disabled):hover { transform: translateY(-1px); }
+main section details > summary { transition: color 160ms ease; }
+main section details > summary:hover { color: var(--gold); }
+
+.ledger-book { position: relative; overflow: hidden; border: 1px solid #bdae91; border-radius: 4px; background: linear-gradient(90deg, #e7ddc9 0, #f5f0e4 2.2%, #fbf8f0 5.4%, #f9f5e9 100%); box-shadow: 0 18px 50px rgb(53 43 29 / 13%), inset 5px 0 12px rgb(90 70 42 / 7%); }
+.ledger-book::before { position: absolute; inset: 0 auto 0 3.2%; width: 1px; content: ""; background: rgb(180 159 121 / 40%); }
+.ledger-book::after { position: absolute; inset: 0 0 auto; height: 8px; content: ""; background: linear-gradient(180deg, rgb(125 99 57 / 8%), transparent); pointer-events: none; }
+.ledger-page { position: relative; min-height: 12rem; border: 1px solid #ded4c0; border-radius: 2px; background: linear-gradient(90deg, rgb(189 172 139 / 10%), transparent 18%), #fbf8f0; box-shadow: 0 4px 14px rgb(58 47 32 / 7%); }
+.ledger-page:hover { transform: translateY(-2px); box-shadow: 0 9px 22px rgb(58 47 32 / 12%); }
+.ledger-rule { height: 1px; background: linear-gradient(90deg, transparent, #b5a17b 18%, #b5a17b 82%, transparent); }
+.ledger-number { color: #8c7955; font-family: Georgia, "Times New Roman", serif; font-variant-numeric: tabular-nums; letter-spacing: .12em; }
+.ledger-amount { font-family: Arial, Helvetica, sans-serif; font-variant-numeric: tabular-nums lining-nums; letter-spacing: -.025em; }
+
+@media (max-width: 640px) {
+  body { background-attachment: scroll; }
+  main > section.rounded-xl, main > section.mx-auto { margin-inline: 0; }
+  .ledger-book::before { left: 2%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+}
+
 
 /* Chronexa full-screen route loading state. The source GIF is used as a
    luminance mask so its dark backdrop disappears against the page. */
