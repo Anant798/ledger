@@ -85,3 +85,48 @@ main section details > summary:hover { color: var(--gold); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
+
+
+/* Chronexa full-screen route loading state. The source GIF is used as a
+   luminance mask so its dark backdrop disappears against the page. */
+.chronexa-loading {
+  position: fixed;
+  z-index: 9999;
+  inset: 0;
+  display: flex;
+  min-height: 100svh;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.25rem;
+  background: var(--paper, #f1ecdf);
+}
+.chronexa-loader-mark {
+  width: min(68vw, 260px);
+  aspect-ratio: 1;
+  background: linear-gradient(135deg, #ff9b24 8%, #f34a16 55%, #b91421 100%);
+  -webkit-mask-image: url('/chronexa-loader-mask.gif');
+  mask-image: url('/chronexa-loader-mask.gif');
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-mode: luminance;
+  mask-mode: luminance;
+  animation: chronexa-loader-glow 2.4s ease-in-out infinite;
+}
+.chronexa-loading-label {
+  color: #756c5d;
+  font-size: 0.7rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+@keyframes chronexa-loader-glow {
+  0%, 100% { filter: saturate(.92) brightness(.96); }
+  50% { filter: saturate(1.08) brightness(1.08); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chronexa-loader-mark { animation: none; }
+}

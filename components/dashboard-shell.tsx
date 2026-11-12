@@ -24,7 +24,7 @@ function ShellContent({ children, name }: { children: ReactNode; name: string })
   const { text } = useLanguage();
   return <div className="min-h-screen lg:grid lg:grid-cols-[250px_minmax(0,1fr)]">
     <aside className="border-b border-[#BFAF8D] bg-[#eee6d6]/90 px-4 py-4 lg:sticky lg:top-0 lg:flex lg:h-screen lg:flex-col lg:border-b-0 lg:border-r lg:px-5 lg:py-6">
-      <Link href="/dashboard" className="flex items-center gap-3 px-2 py-1"><span className="grid h-10 w-10 place-items-center border border-[#B8A783] bg-[#F8F3E8] text-[#715B37]"><BookOpen size={20} strokeWidth={1.5}/></span><span><span className="block text-[9px] tracking-[0.22em] text-[#897653]">PERSONAL MONEY JOURNAL</span><span className="font-serif text-2xl text-[#302B22]">Ledger</span></span></Link>
+      <Link href="/dashboard" className="flex items-center gap-3 px-2 py-1"><span className="grid h-10 w-10 place-items-center border border-[#B8A783] bg-[#F8F3E8] text-[#715B37]"><BookOpen size={20} strokeWidth={1.5}/></span><span><span className="block text-[9px] tracking-[0.22em] text-[#897653]">PERSONAL MONEY JOURNAL</span><span className="font-serif text-2xl text-[#302B22]">Chronexa</span></span></Link>
       <p className="mb-2 mt-7 px-3 text-[10px] uppercase tracking-[0.2em] text-[#897653]">{text("Your pages", "आपके पन्ने")}</p>
       <nav aria-label={text("Main navigation", "मुख्य नेविगेशन")} className="flex gap-1 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible">
         {links.map(({ href, icon: Icon, en, hi }) => {

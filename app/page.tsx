@@ -76,11 +76,11 @@ export default function Home() {
       <div className="relative w-full max-w-md border border-[#BFAF8D] bg-[#FAF7EF] shadow-[0_18px_48px_rgba(53,43,29,0.14)]">
         <div className="border-b border-[#D8CEBB] px-8 py-10 text-center">
           <p className="text-xs tracking-[0.35em] text-[#897653]">
-            PERSONAL FINANCIAL LEDGER
+            PERSONAL FINANCE JOURNAL
           </p>
 
           <h1 className="mt-4 text-5xl font-serif tracking-wide">
-            Ledger
+            Chronexa
           </h1>
 
           <div className="mx-auto my-5 h-px w-16 bg-[#A48A5E]" />
@@ -176,7 +176,7 @@ export default function Home() {
           )}
 
           <p className="mt-7 text-center text-sm text-[#817766]">
-            {isSignup ? "Already have an account?" : "New to Ledger?"}{" "}
+            {isSignup ? "Already have an account?" : "New to Chronexa?"}{" "}
             <button
               type="button"
               onClick={() => {
