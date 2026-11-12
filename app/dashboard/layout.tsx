@@ -5,7 +5,7 @@ import DashboardShell from "@/components/dashboard-shell";
 import { createClient } from "@/lib/supabase/server";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  return <Suspense fallback={<div className="mx-auto min-h-80 w-full max-w-6xl px-4 py-8 sm:px-7 lg:px-10" role="status" aria-live="polite"><p className="text-sm text-[#756C5D]">Loading your Chronexa workspace…</p></div>}>
+  return <Suspense fallback={<main className="chronexa-loading" role="status" aria-live="polite" aria-label="Loading Chronexa"><div className="chronexa-loader-mark" aria-hidden="true" /><p className="chronexa-loading-label">Preparing your financial timeline</p></main>}>
     <AuthenticatedDashboardLayout>{children}</AuthenticatedDashboardLayout>
   </Suspense>;
 }
